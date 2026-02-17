@@ -162,6 +162,12 @@ MANAGE_PREFS_TEXTS = [
     "Cookie settings",
     "Manage Cookies",
     "Manage cookies",
+    "Cookie Manager",
+    "Your Privacy Choices",
+    "Do Not Sell My Personal Information",
+    "Do Not Sell or Share",
+    "Manage consent",
+    "Manage Consent",
     "Customize",
     "More Options",
     "More options",
@@ -169,6 +175,13 @@ MANAGE_PREFS_TEXTS = [
 
 # Inside the preferences panel, look for these to confirm opt-out.
 SAVE_MINIMAL_TEXTS = [
+    "Reject All",
+    "Reject all",
+    "Refuse All",
+    "Refuse all",
+    "Reject Targeting and Marketing",
+    "Confirm My Choices",
+    "Confirm my choices",
     "Save",
     "Confirm",
     "Confirm Choices",
@@ -265,6 +278,360 @@ def try_click_button(page, button_texts, timeout=3000):
             # This text/selector combo didn't work — try the next one.
             continue
     return None
+
+
+# ────────────────────────────────────────────────────────────────────
+# COOKIE OPT-OUT: MULTI-STRATEGY SYSTEM
+# ────────────────────────────────────────────────────────────────────
+
+# Selectors for known cookie consent framework banners.
+_BANNER_SELECTORS = [
+    '#onetrust-banner-sdk',
+    '#CybotCookiebotDialog',
+    '.truste-consent-track',
+    '#truste-consent-track',
+    '.osano-cm-window',
+    '[class*="cookie-banner"]',
+    '[class*="consent-banner"]',
+    '[id*="cookie-banner"]',
+    '[id*="consent-banner"]',
+]
+
+# Footer link texts for finding privacy/cookie preference links.
+_FOOTER_PRIVACY_TEXTS = [
+    "Your Privacy Choices",
+    "Do Not Sell",
+    "Do Not Sell My Personal Information",
+    "Do Not Sell or Share",
+    "Privacy",
+    "Cookie",
+    "Cookie Preferences",
+    "Cookie Settings",
+]
+
+
+def _is_banner_dismissed(page):
+    """Check if the cookie consent banner has been dismissed."""
+    for selector in _BANNER_SELECTORS:
+        try:
+            el = page.query_selector(selector)
+            if el and el.is_visible():
+                return False
+        except Exception:
+            continue
+    return True
+
+
+def _safe_click(page, selector, timeout=3000):
+    """Try to click a selector if it exists and is visible. Returns True on success."""
+    try:
+        locator = page.locator(selector).first
+        if locator.is_visible(timeout=500):
+            locator.click(timeout=timeout)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _try_framework_optout(page):
+    """
+    Strategy 1: Framework-specific selectors (OneTrust, CookieBot, TrustArc, Osano).
+    Returns dict with keys: strategy, clicked, element, verified.
+    """
+    attempt = {"strategy": "framework_specific", "clicked": False, "element": None}
+
+    # ── OneTrust ──────────────────────────────────────────────
+    try:
+        banner = page.query_selector('#onetrust-banner-sdk')
+        if banner and banner.is_visible():
+            # Try direct reject button first
+            if _safe_click(page, '#onetrust-reject-all-handler'):
+                attempt["clicked"] = True
+                attempt["element"] = "OneTrust: Reject All"
+                return attempt
+
+            # Try opening preference center, then reject-all inside it
+            if _safe_click(page, '#onetrust-pc-btn-handler'):
+                page.wait_for_timeout(2000)
+                # Try reject-all in preference center
+                if _safe_click(page, '.ot-pc-refuse-all-handler'):
+                    attempt["clicked"] = True
+                    attempt["element"] = "OneTrust: Preference Center → Reject All"
+                    return attempt
+                # Try save/confirm in preference center (toggles may default to off)
+                clicked_save = try_click_button(page, SAVE_MINIMAL_TEXTS)
+                if clicked_save:
+                    attempt["clicked"] = True
+                    attempt["element"] = f"OneTrust: Preference Center → {clicked_save}"
+                    return attempt
+                # Try the save-preference button directly
+                if _safe_click(page, 'button.save-preference-btn-handler'):
+                    attempt["clicked"] = True
+                    attempt["element"] = "OneTrust: Preference Center → Save Preferences"
+                    return attempt
+    except Exception:
+        pass
+
+    # ── CookieBot ─────────────────────────────────────────────
+    try:
+        banner = page.query_selector('#CybotCookiebotDialog')
+        if banner and banner.is_visible():
+            if _safe_click(page, '#CybotCookiebotDialogBodyButtonDecline'):
+                attempt["clicked"] = True
+                attempt["element"] = "CookieBot: Decline"
+                return attempt
+            # Try customize → then reject/save
+            if _safe_click(page, '#CybotCookiebotDialogBodyLevelButtonCustomize'):
+                page.wait_for_timeout(1500)
+                if _safe_click(page, '#CybotCookiebotDialogBodyButtonDecline'):
+                    attempt["clicked"] = True
+                    attempt["element"] = "CookieBot: Customize → Decline"
+                    return attempt
+    except Exception:
+        pass
+
+    # ── TrustArc ──────────────────────────────────────────────
+    try:
+        for sel in ['.truste-consent-track', '#truste-consent-track']:
+            banner = page.query_selector(sel)
+            if banner and banner.is_visible():
+                if _safe_click(page, '.truste-consent-required'):
+                    attempt["clicked"] = True
+                    attempt["element"] = "TrustArc: Required Only"
+                    return attempt
+                if _safe_click(page, '.truste-consent-button'):
+                    page.wait_for_timeout(2000)
+                    clicked_save = try_click_button(page, SAVE_MINIMAL_TEXTS)
+                    if clicked_save:
+                        attempt["clicked"] = True
+                        attempt["element"] = f"TrustArc: Preferences → {clicked_save}"
+                        return attempt
+    except Exception:
+        pass
+
+    # ── Osano ─────────────────────────────────────────────────
+    try:
+        banner = page.query_selector('.osano-cm-window')
+        if banner and banner.is_visible():
+            if _safe_click(page, '.osano-cm-deny'):
+                attempt["clicked"] = True
+                attempt["element"] = "Osano: Deny"
+                return attempt
+    except Exception:
+        pass
+
+    return attempt
+
+
+def _try_toggle_optout(page):
+    """
+    Strategy 3: Open manage preferences, disable toggles, save.
+    Returns dict with keys: strategy, clicked, element.
+    """
+    attempt = {"strategy": "manage_prefs_toggles", "clicked": False, "element": None}
+
+    manage_clicked = try_click_button(page, MANAGE_PREFS_TEXTS)
+    if not manage_clicked:
+        return attempt
+
+    print(f'[*] Clicked preferences button: "{manage_clicked}"')
+    page.wait_for_timeout(2000)
+
+    # Try to disable checked toggles inside preference panels.
+    toggle_selectors = [
+        'input[type="checkbox"]:checked',
+        '[aria-checked="true"]',
+        '.ot-switch input:checked',
+    ]
+    toggles_flipped = 0
+    for sel in toggle_selectors:
+        try:
+            toggles = page.locator(sel)
+            count = toggles.count()
+            for i in range(count):
+                try:
+                    toggle = toggles.nth(i)
+                    if toggle.is_visible(timeout=300):
+                        toggle.click(timeout=1000)
+                        toggles_flipped += 1
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    if toggles_flipped > 0:
+        print(f"[*] Disabled {toggles_flipped} toggle(s) in preferences panel.")
+
+    # Now click save/confirm
+    save_clicked = try_click_button(page, SAVE_MINIMAL_TEXTS)
+    if save_clicked:
+        attempt["clicked"] = True
+        attempt["element"] = f"Manage Preferences ({manage_clicked}) → {save_clicked}"
+        if toggles_flipped > 0:
+            attempt["element"] += f" (disabled {toggles_flipped} toggles)"
+    elif toggles_flipped > 0:
+        # Try clicking the save button by selector as a last resort
+        if _safe_click(page, 'button.save-preference-btn-handler'):
+            attempt["clicked"] = True
+            attempt["element"] = f"Manage Preferences ({manage_clicked}) → Save (disabled {toggles_flipped} toggles)"
+
+    return attempt
+
+
+def _try_footer_privacy_link(page):
+    """
+    Strategy 4: Look for a privacy/cookie link in the footer and try opt-out there.
+    Returns dict with keys: strategy, clicked, element.
+    """
+    attempt = {"strategy": "footer_link", "clicked": False, "element": None}
+
+    for text in _FOOTER_PRIVACY_TEXTS:
+        try:
+            for selector in [
+                f'footer a:has-text("{text}")',
+                f'a:has-text("{text}")',
+                f'[role="link"]:has-text("{text}")',
+            ]:
+                locator = page.locator(selector).first
+                if locator.is_visible(timeout=500):
+                    locator.click(timeout=3000)
+                    print(f'[*] Clicked footer privacy link: "{text}"')
+                    page.wait_for_timeout(2500)
+
+                    # Now try framework-specific opt-out on the new modal/page
+                    fw_attempt = _try_framework_optout(page)
+                    if fw_attempt["clicked"]:
+                        attempt["clicked"] = True
+                        attempt["element"] = f"Footer ({text}) → {fw_attempt['element']}"
+                        return attempt
+
+                    # Try direct text buttons
+                    direct = try_click_button(page, PRIMARY_OPTOUT_TEXTS)
+                    if direct:
+                        attempt["clicked"] = True
+                        attempt["element"] = f"Footer ({text}) → {direct}"
+                        return attempt
+
+                    # Try toggle approach
+                    toggle_attempt = _try_toggle_optout(page)
+                    if toggle_attempt["clicked"]:
+                        attempt["clicked"] = True
+                        attempt["element"] = f"Footer ({text}) → {toggle_attempt['element']}"
+                        return attempt
+
+                    # Tried this link but nothing worked — continue to next
+                    break
+        except Exception:
+            continue
+
+    return attempt
+
+
+def attempt_cookie_optout(page, domain):
+    """
+    Multi-strategy cookie opt-out system.
+
+    Tries multiple strategies in order and verifies success by checking
+    if the consent banner is dismissed after each attempt.
+
+    Returns a dict with:
+      - opt_out_found: "yes" | "no"
+      - opt_out_clicked: "yes" | "no"
+      - opt_out_verified: "yes" | "no"
+      - opt_out_method: description of what worked
+      - opt_out_attempts: list of attempt dicts
+    """
+    results = {
+        "opt_out_found": "no",
+        "opt_out_clicked": "no",
+        "opt_out_verified": "no",
+        "opt_out_method": None,
+        "opt_out_attempts": [],
+    }
+
+    strategies = [
+        ("Framework-Specific", _try_framework_optout),
+        ("Direct Text Buttons", lambda p: {
+            "strategy": "direct_text",
+            "clicked": bool(try_click_button(p, PRIMARY_OPTOUT_TEXTS)),
+            "element": try_click_button(p, PRIMARY_OPTOUT_TEXTS),
+        }),
+        ("Manage Preferences + Toggles", _try_toggle_optout),
+        ("Footer Privacy Link", _try_footer_privacy_link),
+    ]
+
+    # For strategy 2, we need a wrapper that doesn't double-click
+    def _direct_text_strategy(p):
+        clicked = try_click_button(p, PRIMARY_OPTOUT_TEXTS)
+        return {
+            "strategy": "direct_text",
+            "clicked": bool(clicked),
+            "element": clicked,
+        }
+
+    strategies[1] = ("Direct Text Buttons", _direct_text_strategy)
+
+    for name, strategy_fn in strategies:
+        print(f"[*] Trying opt-out strategy: {name}...")
+        try:
+            attempt = strategy_fn(page)
+        except Exception as e:
+            print(f"[!] Strategy {name} raised error: {e}")
+            attempt = {"strategy": name, "clicked": False, "element": None}
+
+        results["opt_out_attempts"].append(attempt)
+
+        if attempt.get("clicked"):
+            results["opt_out_found"] = "yes"
+            results["opt_out_clicked"] = "yes"
+            print(f'[*] Opt-out clicked via {name}: {attempt.get("element")}')
+
+            # Wait for banner to animate away
+            page.wait_for_timeout(2000)
+
+            if _is_banner_dismissed(page):
+                results["opt_out_verified"] = "yes"
+                results["opt_out_method"] = attempt.get("element", name)
+                print(f"[*] Banner dismissed — opt-out verified!")
+                break
+            else:
+                print(f"[!] Banner still visible after {name} — trying next strategy...")
+        else:
+            print(f"[*] Strategy {name} did not find anything to click.")
+
+    # Last resort: try dismissing any remaining overlay
+    if results["opt_out_verified"] != "yes":
+        for selector in ['#onetrust-accept-btn-handler', '.cookie-close',
+                         '[class*="dismiss"]', '.close-button', '[aria-label="Close"]']:
+            try:
+                if _safe_click(page, selector):
+                    page.wait_for_timeout(1500)
+                    if _is_banner_dismissed(page):
+                        results["opt_out_found"] = "yes"
+                        results["opt_out_clicked"] = "yes"
+                        results["opt_out_verified"] = "yes"
+                        results["opt_out_method"] = f"Dismissed overlay via {selector}"
+                        print(f"[*] Dismissed overlay via {selector}")
+                        break
+            except Exception:
+                continue
+
+    return results
+
+
+# ────────────────────────────────────────────────────────────────────
+# SCREENSHOT HELPER
+# ────────────────────────────────────────────────────────────────────
+
+def _take_optout_screenshot(page, safe_domain):
+    """Take a screenshot after opt-out attempt for verification."""
+    path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_optout.png")
+    try:
+        page.screenshot(path=path, full_page=False)
+        return path
+    except Exception:
+        return None
 
 
 # Labels we look for when trying to navigate to the shop/products page.
@@ -417,6 +784,10 @@ def scan_url(browser, url, status_callback=None):
         "new_cookies_details": [],
         "request_details": [],
         "scan_timeline": [],
+        # Cookie opt-out verification data.
+        "opt_out_verified": "no",
+        "opt_out_method": None,
+        "opt_out_attempts": [],
     }
 
     def report_status(message, step):
@@ -538,41 +909,28 @@ def scan_url(browser, url, status_callback=None):
     print("[*] Looking for cookie consent opt-out button...")
     report_status("Looking for cookie consent opt-out button...", 6)
 
-    # First, try the direct opt-out buttons (Reject All, Decline, etc.)
-    clicked = try_click_button(page, PRIMARY_OPTOUT_TEXTS)
+    optout_result = attempt_cookie_optout(page, domain)
+    results["opt_out_found"] = optout_result["opt_out_found"]
+    results["opt_out_clicked"] = optout_result["opt_out_clicked"]
+    results["opt_out_verified"] = optout_result["opt_out_verified"]
+    results["opt_out_method"] = optout_result["opt_out_method"]
+    results["opt_out_attempts"] = optout_result["opt_out_attempts"]
 
-    if clicked:
-        results["opt_out_found"] = "yes"
-        results["opt_out_clicked"] = "yes"
-        print(f'[*] Clicked opt-out button: "{clicked}"')
-        report_status(f'Opted out of tracking via "{clicked}"', 7)
+    # Take screenshot after opt-out attempt for verification.
+    optout_screenshot = _take_optout_screenshot(page, safe_domain)
+    if optout_screenshot:
+        results["screenshot_optout"] = optout_screenshot
+
+    if results["opt_out_verified"] == "yes":
+        report_status(f'Opted out via: {results["opt_out_method"]}', 7)
+    elif results["opt_out_clicked"] == "yes":
+        results["notes"].append(
+            "Opt-out was clicked but banner may still be visible — unverified."
+        )
+        report_status("Opt-out clicked but banner still visible", 7)
     else:
-        # No direct button found — try "Manage Preferences" flow.
-        print("[*] No direct opt-out button found. "
-              "Trying 'Manage Preferences' flow...")
-        manage_clicked = try_click_button(page, MANAGE_PREFS_TEXTS)
-
-        if manage_clicked:
-            results["opt_out_found"] = "yes"
-            print(f'[*] Clicked preferences button: "{manage_clicked}"')
-            # Wait for the preferences panel to appear.
-            page.wait_for_timeout(2000)
-
-            # Now look for a save/confirm button inside the panel.
-            save_clicked = try_click_button(page, SAVE_MINIMAL_TEXTS)
-            if save_clicked:
-                results["opt_out_clicked"] = "yes"
-                print(f'[*] Clicked save/confirm button: "{save_clicked}"')
-            else:
-                print("[!] Could not find a save/confirm button in the "
-                      "preferences panel.")
-                results["notes"].append(
-                    "Opened preferences panel but could not confirm opt-out."
-                )
-        else:
-            print("[!] No cookie consent banner or opt-out button found.")
-            results["notes"].append("No cookie consent banner found.")
-            report_status("No cookie consent banner found", 7)
+        results["notes"].append("No cookie consent banner found.")
+        report_status("No cookie consent banner found", 7)
 
     # ── Step 7: Wait after opt-out ──────────────────────────────────
     # Give the site time to actually disable trackers.
@@ -741,10 +1099,13 @@ def scan_url(browser, url, status_callback=None):
         print("[*] No known tracker domains found in post-opt-out requests.")
         report_status("No tracker domains found after opt-out", 14)
 
-    # Flag as a violation if tracker requests were made post-opt-out,
-    # OR if new third-party cookies belong to known tracker domains.
+    # Flag as a violation ONLY if opt-out was verified AND trackers still present.
+    # If opt-out was not verified, mark as inconclusive regardless.
     if results["trackers_after"]:
-        results["still_tracking"] = "yes"
+        if results["opt_out_verified"] == "yes":
+            results["still_tracking"] = "yes"
+        else:
+            results["still_tracking"] = "inconclusive"
 
     if new_tp_cookie_domains:
         # Check if any new third-party cookie domains match known trackers.
@@ -752,7 +1113,10 @@ def scan_url(browser, url, status_callback=None):
             d for d in new_tp_cookie_domains if is_tracker_request(d.lstrip("."))
         ]
         if tracker_cookie_domains:
-            results["still_tracking"] = "yes"
+            if results["opt_out_verified"] == "yes":
+                results["still_tracking"] = "yes"
+            elif results["still_tracking"] != "yes":
+                results["still_tracking"] = "inconclusive"
             print(f"\n[!] NEW tracker cookies set after opt-out:")
             for d in tracker_cookie_domains:
                 print(f"      - {d}")
@@ -815,6 +1179,7 @@ def scan_url(browser, url, status_callback=None):
         "before": results["screenshot_before"],
         "after": results["screenshot_after"],
         "viewport": results.get("screenshot_viewport"),
+        "optout": results.get("screenshot_optout"),
     })
 
     row_id = database.save_scan_result(
@@ -865,6 +1230,8 @@ def print_summary(results):
 
     if results["still_tracking"] == "yes":
         print(f"\n  *** STILL TRACKING AFTER OPT-OUT ***")
+    elif results["still_tracking"] == "inconclusive":
+        print(f"\n  *** INCONCLUSIVE — Opt-out could not be verified ***")
     else:
         print(f"\n  Tracking stopped after opt-out: OK")
 
@@ -988,6 +1355,7 @@ def main():
 
     violations = [r for r in all_results if r.get("still_tracking") == "yes"]
     clean = [r for r in all_results if r.get("still_tracking") == "no"]
+    inconclusive = [r for r in all_results if r.get("still_tracking") == "inconclusive"]
     errors = [r for r in all_results if r.get("still_tracking") == "unknown"]
 
     print(f"  Violations (still tracking after opt-out): {len(violations)}")
@@ -997,6 +1365,11 @@ def main():
     print(f"  Clean (stopped tracking after opt-out)   : {len(clean)}")
     for c in clean:
         print(f"    - {c['url']}")
+
+    if inconclusive:
+        print(f"  Inconclusive (opt-out not verified)      : {len(inconclusive)}")
+        for i in inconclusive:
+            print(f"    - {i['url']}")
 
     if errors:
         print(f"  Errors (scan failed)                     : {len(errors)}")

@@ -666,12 +666,25 @@ def generate_demand_letter(result, output_path):
     pdf.ln(2)
     pdf.set_font("Helvetica", "", 10)
 
-    pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
-        f"On {date_str}, our client visited {domain}. Upon arrival, the website "
-        "presented a cookie consent mechanism. Our client affirmatively opted out "
-        "of tracking by clicking the opt-out/reject button on the cookie consent "
-        "banner. Despite this clear expression of refusal to consent to tracking, "
-        "the website continued to deploy tracking technologies.")
+    opt_out_verified = result.get("opt_out_verified") == "yes"
+    opt_out_method = result.get("opt_out_method", "the opt-out/reject button")
+
+    if opt_out_verified:
+        pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
+            f"On {date_str}, our client visited {domain}. Upon arrival, the website "
+            "presented a cookie consent mechanism. Our client affirmatively opted out "
+            f"of tracking via {opt_out_method} on the cookie consent "
+            "banner. The opt-out was verified -- the consent banner was confirmed dismissed. "
+            "Despite this clear expression of refusal to consent to tracking, "
+            "the website continued to deploy tracking technologies.")
+    else:
+        pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
+            f"On {date_str}, our client visited {domain}. Upon arrival, the website "
+            "presented a cookie consent mechanism. Our client attempted to opt out "
+            "of tracking by interacting with the cookie consent banner. "
+            "However, the opt-out could not be fully verified as the consent banner "
+            "may not have been properly dismissed. Regardless, tracking technologies "
+            "continued to be deployed during the browsing session.")
     pdf.ln(3)
 
     pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
@@ -828,11 +841,25 @@ def generate_scan_report(result, output_path):
         pdf.set_text_color(0, 0, 0)
         pdf.ln(4)
         pdf.set_font("Helvetica", "", 11)
+        opt_method = result.get("opt_out_method", "the cookie consent mechanism")
         pdf.multi_cell(0, 6, new_x="LMARGIN", new_y="NEXT", text=
             f"The scan detected {len(flagged)} tracker domain(s) that continued "
-            f"sending data after the user opted out of tracking via the cookie "
-            f"consent mechanism. This may constitute violations of CIPA, CCPA/CPRA, "
+            f"sending data after the user opted out of tracking via {opt_method}. "
+            f"This may constitute violations of CIPA, CCPA/CPRA, "
             f"and other California privacy laws.")
+    elif result.get("still_tracking") == "inconclusive":
+        pdf.set_fill_color(255, 165, 2)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 12, "  INCONCLUSIVE: Opt-out could not be verified", ln=True, fill=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "", 11)
+        pdf.multi_cell(0, 6, new_x="LMARGIN", new_y="NEXT", text=
+            "The scanner was unable to verify that the cookie opt-out was successful. "
+            "The consent banner may not have been properly dismissed. Trackers were "
+            "detected during the browsing session, but it cannot be confirmed whether "
+            "these persisted after a valid opt-out. Manual verification is recommended.")
     else:
         pdf.set_fill_color(46, 213, 115)
         pdf.set_text_color(255, 255, 255)
@@ -852,6 +879,10 @@ def generate_scan_report(result, output_path):
     pdf.set_font("Helvetica", "", 11)
     pdf.cell(0, 7, f"Opt-out banner found: {result.get('opt_out_found', 'N/A')}", ln=True)
     pdf.cell(0, 7, f"Opt-out clicked: {result.get('opt_out_clicked', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Opt-out verified: {result.get('opt_out_verified', 'N/A')}", ln=True)
+    opt_method = result.get("opt_out_method")
+    if opt_method:
+        pdf.cell(0, 7, _sanitize_for_pdf(f"Opt-out method: {opt_method}"), ln=True)
     pdf.cell(0, 7, f"Trackers before opt-out: {len(result.get('trackers_before', []))}", ln=True)
     pdf.cell(0, 7, f"Trackers after opt-out: {len(result.get('trackers_after', []))}", ln=True)
     pdf.cell(0, 7, f"Flagged domains (post-opt-out): {len(flagged)}", ln=True)
@@ -989,6 +1020,9 @@ def generate_evidence_log(result, output_path):
         "opt_out": {
             "found": result.get("opt_out_found") == "yes",
             "clicked": result.get("opt_out_clicked") == "yes",
+            "verified": result.get("opt_out_verified") == "yes",
+            "method": result.get("opt_out_method"),
+            "attempts": result.get("opt_out_attempts", []),
         },
         "network_requests_after_optout": result.get("request_details", []),
         "cookies_before_optout": result.get("cookies_before_details", []),

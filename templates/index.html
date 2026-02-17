@@ -366,6 +366,11 @@ header .subtitle {
     color: var(--warning);
     border: 1px solid rgba(255, 165, 2, 0.25);
 }
+.badge-inconclusive {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border: 1px solid rgba(255, 165, 2, 0.25);
+}
 
 .batch-table .domain-cell {
     font-family: var(--mono);
@@ -426,6 +431,11 @@ header .subtitle {
     background: var(--success-bg);
     color: var(--success);
     border: 1px solid rgba(46, 213, 115, 0.25);
+}
+.verdict-banner.inconclusive {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border: 1px solid rgba(255, 165, 2, 0.25);
 }
 .verdict-banner .icon { font-size: 1.4rem; }
 
@@ -992,8 +1002,8 @@ function connectBatchSSE(batchId) {
 
         if (result.still_tracking === 'yes') {
             batchViolations++;
-        } else if (result.still_tracking === 'error') {
-            // count errors separately — don't increment clean
+        } else if (result.still_tracking === 'inconclusive' || result.still_tracking === 'error') {
+            // count inconclusive and errors separately — don't increment clean or violations
         } else {
             batchClean++;
         }
@@ -1087,6 +1097,12 @@ function addBatchResultRow(url, scanId, result) {
         categories = cats.length > 0 ? cats.join(', ') : '--';
         actions = '<button class="action-link action-link-evidence" onclick="window.open(\'/api/scan/' + scanId + '/evidence\', \'_blank\')">Evidence</button>' +
                   '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
+    } else if (result.still_tracking === 'inconclusive') {
+        statusBadge = '<span class="badge badge-inconclusive">INCONCLUSIVE</span>';
+        trackerCount = result.trackers_after ? result.trackers_after.length : '?';
+        const cats = getCategoriesForResult(result);
+        categories = cats.length > 0 ? cats.join(', ') : 'Opt-out not verified';
+        actions = '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
     } else {
         statusBadge = '<span class="badge badge-pass">PASS</span>';
         trackerCount = '0';
@@ -1101,8 +1117,9 @@ function addBatchResultRow(url, scanId, result) {
         '<td class="categories-cell">' + categories + '</td>' +
         '<td><div class="actions-cell">' + actions + '</div></td>';
 
-    // Sort: FAIL first, then ERROR, then PASS
-    row.dataset.status = result.still_tracking === 'yes' ? '0' : (result.still_tracking === 'error' ? '1' : '2');
+    // Sort: FAIL first, then INCONCLUSIVE, then ERROR, then PASS
+    const sortOrder = { 'yes': '0', 'inconclusive': '1', 'error': '2' };
+    row.dataset.status = sortOrder[result.still_tracking] || '3';
 
     // Insert in sorted position
     const rows = Array.from(tbody.querySelectorAll('tr'));
@@ -1158,6 +1175,9 @@ function displayResults(result) {
     if (result.still_tracking === 'yes') {
         banner.className = 'verdict-banner violation';
         banner.innerHTML = '<span class="icon">&#9888;</span> TRACKING VIOLATIONS DETECTED';
+    } else if (result.still_tracking === 'inconclusive') {
+        banner.className = 'verdict-banner inconclusive';
+        banner.innerHTML = '<span class="icon">&#9888;</span> INCONCLUSIVE — Opt-out could not be verified';
     } else {
         banner.className = 'verdict-banner clean';
         banner.innerHTML = '<span class="icon">&#10003;</span> NO VIOLATIONS DETECTED';
@@ -1171,8 +1191,14 @@ function displayResults(result) {
     // Summary cards
     document.getElementById('val-optout').textContent =
         result.opt_out_found === 'yes' ? 'Found' : 'Not Found';
-    document.getElementById('detail-optout').textContent =
-        result.opt_out_clicked === 'yes' ? 'Successfully clicked' : 'Could not click';
+    if (result.opt_out_verified === 'yes') {
+        document.getElementById('detail-optout').textContent =
+            'Verified: ' + (result.opt_out_method || 'opt-out confirmed');
+    } else if (result.opt_out_clicked === 'yes') {
+        document.getElementById('detail-optout').textContent = 'Clicked but not verified';
+    } else {
+        document.getElementById('detail-optout').textContent = 'Could not click';
+    }
 
     document.getElementById('val-before').textContent = result.trackers_before.length;
     document.getElementById('detail-before').textContent =
@@ -1236,9 +1262,9 @@ function displayResults(result) {
         window.open('/api/scan/' + currentScanId + '/pdf', '_blank');
     };
 
-    // Evidence package button (only for violations)
+    // Evidence package button (for violations and inconclusive)
     const evidenceBtn = document.getElementById('download-evidence-btn');
-    if (result.still_tracking === 'yes') {
+    if (result.still_tracking === 'yes' || result.still_tracking === 'inconclusive') {
         evidenceBtn.style.display = '';
         evidenceBtn.onclick = () => {
             window.open('/api/scan/' + currentScanId + '/evidence', '_blank');
