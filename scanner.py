@@ -271,12 +271,16 @@ def try_click_button(page, button_texts, timeout=3000):
 SHOP_LINK_TEXTS = [
     "Shop All",
     "Shop all",
+    "shop all",
     "Shop Now",
     "Shop now",
     "All Products",
     "All products",
     "Products",
     "Collections",
+    "New Arrivals",
+    "New arrivals",
+    "new arrivals",
     "Shop",
     "Catalog",
     "Store",
@@ -324,10 +328,13 @@ def click_first_product(page):
         '.product-grid-item a[href*="/products/"]',
         '.grid__item a[href*="/products/"]',
         'a.product-card[href*="/products/"]',
-        # Generic product links
+        # Generic product links (plural and singular paths)
         'a[href*="/products/"]',
         'a[href*="/product/"]',
         'a[href*="/shop/"]',
+        'a[href*="/p/"]',
+        'a[href*="/dp/"]',
+        'a[href*="/item/"]',
         # Product cards with images (common pattern)
         '.product a',
         '.product-item a',
@@ -649,17 +656,42 @@ def scan_url(browser, url, status_callback=None):
             page.wait_for_timeout(POST_OPTOUT_MONITOR * 1000)
     else:
         print("[!] Could not find a Shop / All Products link.")
-        report_status("No shop page found — monitoring homepage", 10)
-        results["notes"].append("Could not find shop link; monitored homepage instead.")
-        # Fall back: scroll and interact with the homepage.
-        try:
-            page.mouse.move(640, 450)
-            for _ in range(3):
-                page.mouse.wheel(0, 400)
-                page.wait_for_timeout(1500)
-        except Exception:
-            pass
-        page.wait_for_timeout(POST_OPTOUT_MONITOR * 1000)
+        report_status("No shop page found — trying products on current page", 10)
+
+        # Try clicking a product directly on the homepage.
+        captured_requests.clear()
+        request_details.clear()
+        report_status("Looking for products on current page...", 11)
+        product_clicked = click_first_product(page)
+
+        if product_clicked:
+            print("[*] Clicked on a product from homepage — monitoring...")
+            report_status("Clicked product — monitoring network requests...", 12)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeout:
+                pass
+            page.wait_for_timeout(5000)
+
+            try:
+                page.mouse.move(640, 450)
+                for _ in range(3):
+                    page.mouse.wheel(0, 400)
+                    page.wait_for_timeout(1500)
+            except Exception:
+                pass
+            results["notes"].append("Clicked a product directly from homepage.")
+        else:
+            results["notes"].append("Could not find shop link or products; monitored homepage instead.")
+            # Fall back: scroll and interact with the homepage.
+            try:
+                page.mouse.move(640, 450)
+                for _ in range(3):
+                    page.mouse.wheel(0, 400)
+                    page.wait_for_timeout(1500)
+            except Exception:
+                pass
+            page.wait_for_timeout(POST_OPTOUT_MONITOR * 1000)
 
     # ── Step 9: Check for continued tracking ────────────────────────
     # Now look at everything the browser sent during the shopping flow.
@@ -709,18 +741,35 @@ def scan_url(browser, url, status_callback=None):
         print("[*] No known tracker domains found in post-opt-out requests.")
         report_status("No tracker domains found after opt-out", 14)
 
-    # Only flag as a violation if actual tracker requests were made post-opt-out.
+    # Flag as a violation if tracker requests were made post-opt-out,
+    # OR if new third-party cookies belong to known tracker domains.
     if results["trackers_after"]:
         results["still_tracking"] = "yes"
 
     if new_tp_cookie_domains:
-        print(f"\n[!] NEW third-party cookies set after opt-out:")
-        for d in new_tp_cookie_domains:
-            print(f"      - {d}")
-        results["notes"].append(
-            f"New third-party cookies after opt-out: "
-            f"{json.dumps(new_tp_cookie_domains)}"
-        )
+        # Check if any new third-party cookie domains match known trackers.
+        tracker_cookie_domains = [
+            d for d in new_tp_cookie_domains if is_tracker_request(d.lstrip("."))
+        ]
+        if tracker_cookie_domains:
+            results["still_tracking"] = "yes"
+            print(f"\n[!] NEW tracker cookies set after opt-out:")
+            for d in tracker_cookie_domains:
+                print(f"      - {d}")
+            results["notes"].append(
+                f"New tracker cookies after opt-out: "
+                f"{json.dumps(tracker_cookie_domains)}"
+            )
+
+        # Log all new third-party cookies (even non-tracker ones) as notes.
+        non_tracker = [d for d in new_tp_cookie_domains if d not in tracker_cookie_domains]
+        if non_tracker:
+            print(f"\n[*] Other new third-party cookies (not flagged):")
+            for d in non_tracker:
+                print(f"      - {d}")
+            results["notes"].append(
+                f"Other new third-party cookies: {json.dumps(non_tracker)}"
+            )
 
     # Store the full domain breakdown in results for the summary.
     results["flagged_domains"] = flagged_domains
