@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Scanner</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg-primary: #0f1117;
+    --bg-secondary: #1a1d29;
+    --bg-card: #222639;
+    --text-primary: #e4e6f0;
+    --text-secondary: #8b8fa3;
+    --accent: #6c63ff;
+    --accent-hover: #5a52d5;
+    --danger: #ff4757;
+    --danger-bg: rgba(255, 71, 87, 0.12);
+    --success: #2ed573;
+    --success-bg: rgba(46, 213, 115, 0.12);
+    --border: #2d3148;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+html { font-size: 15px; }
+body {
+    font-family: var(--font);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* ── Header ────────────────────────────────────────────── */
+header {
+    text-align: center;
+    padding: 2.5rem 1rem 0;
+    transition: padding 0.4s ease;
+}
+header h1 {
+    font-size: 2.2rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+header .subtitle {
+    color: var(--text-secondary);
+    margin-top: 0.4rem;
+    font-size: 1rem;
+}
+
+/* ── Search section ────────────────────────────────────── */
+#search-section {
+    width: 100%;
+    max-width: 640px;
+    padding: 1rem;
+    margin-top: 22vh;
+    transition: margin-top 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+#search-section.top { margin-top: 1.5rem; }
+
+.search-bar {
+    display: flex;
+    gap: 0;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+}
+.search-bar input {
+    flex: 1;
+    padding: 1rem 1.2rem;
+    font-size: 1.05rem;
+    background: var(--bg-card);
+    border: 2px solid var(--border);
+    border-right: none;
+    border-radius: 12px 0 0 12px;
+    color: var(--text-primary);
+    outline: none;
+    font-family: var(--font);
+}
+.search-bar input:focus { border-color: var(--accent); }
+.search-bar input::placeholder { color: var(--text-secondary); }
+
+.search-bar button {
+    padding: 1rem 2rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 0 12px 12px 0;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-family: var(--font);
+    white-space: nowrap;
+}
+.search-bar button:hover:not(:disabled) { background: var(--accent-hover); }
+.search-bar button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── Progress section ──────────────────────────────────── */
+#progress-section {
+    width: 100%;
+    max-width: 640px;
+    padding: 2rem 1rem;
+}
+.progress-container { text-align: center; }
+
+.progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-card);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 1.2rem;
+}
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent), #a78bfa);
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+.status-line {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+}
+.status-text {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+}
+.status-text.error { color: var(--danger); }
+
+.pulse-dot {
+    width: 8px; height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* ── Results section ───────────────────────────────────── */
+#results-section {
+    width: 100%;
+    max-width: 960px;
+    padding: 0 1rem 3rem;
+}
+
+.verdict-banner {
+    padding: 1.2rem 1.5rem;
+    border-radius: 12px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    margin-bottom: 1.5rem;
+}
+.verdict-banner.violation {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid rgba(255, 71, 87, 0.25);
+}
+.verdict-banner.clean {
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid rgba(46, 213, 115, 0.25);
+}
+.verdict-banner .icon { font-size: 1.4rem; }
+
+.scan-meta {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin-bottom: 1.5rem;
+}
+
+/* ── Summary cards ─────────────────────────────────────── */
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+}
+.card-label {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 0.3rem;
+}
+.card-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+}
+.card-detail {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    margin-top: 0.2rem;
+}
+
+/* ── Tracker table ─────────────────────────────────────── */
+.tracker-table-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+    margin-bottom: 1.5rem;
+    overflow-x: auto;
+}
+.tracker-table-card h3 {
+    font-size: 1rem;
+    margin-bottom: 0.8rem;
+}
+.tracker-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+}
+.tracker-table th {
+    text-align: left;
+    padding: 0.5rem 0.8rem;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.tracker-table td {
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid rgba(45, 49, 72, 0.5);
+}
+.tracker-table tr:hover td { background: rgba(108, 99, 255, 0.06); }
+.tracker-table .category-row td {
+    font-weight: 700;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--accent);
+    padding-top: 0.9rem;
+    border-bottom: none;
+    background: none;
+}
+.tracker-table .domain-cell {
+    font-family: var(--mono);
+    font-size: 0.84rem;
+}
+.tracker-table .count-cell {
+    font-weight: 600;
+    text-align: center;
+}
+
+/* ── Screenshots ───────────────────────────────────────── */
+.screenshots-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+.screenshot-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.screenshot-card h3 {
+    font-size: 0.88rem;
+    padding: 0.8rem 1rem;
+    border-bottom: 1px solid var(--border);
+}
+.screenshot-card img {
+    width: 100%;
+    max-height: 400px;
+    object-fit: contain;
+    background: #1a1a2e;
+    display: block;
+}
+
+/* ── Action buttons ────────────────────────────────────── */
+.actions {
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+}
+.btn {
+    padding: 0.75rem 1.5rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: background 0.2s, transform 0.1s;
+    font-family: var(--font);
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+    background: var(--accent);
+    color: #fff;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-secondary {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+}
+.btn-secondary:hover { background: var(--bg-secondary); }
+
+/* ── Utilities ─────────────────────────────────────────── */
+.hidden { display: none !important; }
+
+@media (max-width: 640px) {
+    .screenshots-grid { grid-template-columns: 1fr; }
+    .summary-grid { grid-template-columns: 1fr; }
+    #search-section { margin-top: 12vh; }
+    header h1 { font-size: 1.6rem; }
+}
+</style>
+</head>
+<body>
+
+<header>
+    <h1>Privacy Scanner</h1>
+    <p class="subtitle">Check if websites respect your privacy choices</p>
+</header>
+
+<section id="search-section">
+    <form id="scan-form">
+        <div class="search-bar">
+            <input type="text" id="url-input" placeholder="Enter a domain (e.g. kos.com)" autocomplete="off" spellcheck="false" />
+            <button type="submit" id="scan-btn">Scan</button>
+        </div>
+    </form>
+</section>
+
+<section id="progress-section" class="hidden">
+    <div class="progress-container">
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="status-line">
+            <div class="pulse-dot" id="pulse-dot"></div>
+            <p class="status-text" id="status-text">Starting scan...</p>
+        </div>
+    </div>
+</section>
+
+<section id="results-section" class="hidden">
+    <div id="verdict-banner" class="verdict-banner"></div>
+    <div class="scan-meta" id="scan-meta"></div>
+
+    <div class="summary-grid">
+        <div class="card" id="card-optout">
+            <div class="card-label">Opt-Out Banner</div>
+            <div class="card-value" id="val-optout">--</div>
+            <div class="card-detail" id="detail-optout"></div>
+        </div>
+        <div class="card" id="card-before">
+            <div class="card-label">Trackers Before</div>
+            <div class="card-value" id="val-before">--</div>
+            <div class="card-detail" id="detail-before"></div>
+        </div>
+        <div class="card" id="card-after">
+            <div class="card-label">Trackers After</div>
+            <div class="card-value" id="val-after">--</div>
+            <div class="card-detail" id="detail-after"></div>
+        </div>
+    </div>
+
+    <div class="tracker-table-card" id="tracker-table-card">
+        <h3>Flagged Tracker Domains (Post-Opt-Out)</h3>
+        <table class="tracker-table">
+            <thead><tr><th>Domain</th><th style="text-align:center">Requests</th><th>Matched Rule</th></tr></thead>
+            <tbody id="tracker-tbody"></tbody>
+        </table>
+    </div>
+
+    <div class="screenshots-grid" id="screenshots-grid">
+        <div class="screenshot-card">
+            <h3>Before Opt-Out</h3>
+            <img id="screenshot-before" alt="Before screenshot" />
+        </div>
+        <div class="screenshot-card">
+            <h3>After Opt-Out</h3>
+            <img id="screenshot-after" alt="After screenshot" />
+        </div>
+    </div>
+
+    <div class="actions">
+        <button class="btn btn-primary" id="download-pdf-btn">Download PDF Report</button>
+        <button class="btn btn-primary" id="download-evidence-btn" style="display:none; background:#ff4757;">Download Evidence Package</button>
+        <button class="btn btn-secondary" id="new-scan-btn">New Scan</button>
+    </div>
+</section>
+
+<script>
+/* ── State ──────────────────────────────────────────────── */
+let currentScanId = null;
+let eventSource = null;
+
+/* ── DOM refs ───────────────────────────────────────────── */
+const scanForm        = document.getElementById('scan-form');
+const urlInput        = document.getElementById('url-input');
+const scanBtn         = document.getElementById('scan-btn');
+const searchSection   = document.getElementById('search-section');
+const progressSection = document.getElementById('progress-section');
+const resultsSection  = document.getElementById('results-section');
+const progressFill    = document.getElementById('progress-fill');
+const statusText      = document.getElementById('status-text');
+const pulseDot        = document.getElementById('pulse-dot');
+
+/* ── Category mapping for grouping tracker domains ────── */
+const CATEGORY_MAP = {
+    'google-analytics.com': 'Google',
+    'googletagmanager.com': 'Google',
+    'doubleclick.net': 'Google',
+    'googlesyndication.com': 'Google',
+    'connect.facebook.net': 'Meta / Facebook',
+    'facebook.net': 'Meta / Facebook',
+    'graph.facebook.com': 'Meta / Facebook',
+    'www.facebook.com/tr': 'Meta / Facebook',
+    'pixel.facebook.com': 'Meta / Facebook',
+    'clarity.ms': 'Microsoft',
+    'bat.bing.com': 'Microsoft',
+    'hotjar.com': 'Session Recording',
+    'mixpanel.com': 'Analytics',
+    'segment.com': 'Analytics',
+    'amplitude.com': 'Analytics',
+    'fullstory.com': 'Session Recording',
+    'crazyegg.com': 'Session Recording',
+    'mouseflow.com': 'Session Recording',
+    'hubspot.com': 'Marketing',
+    'marketo.com': 'Marketing',
+    'pardot.com': 'Marketing',
+    'ct.pinterest.com': 'Pinterest',
+    'pinterest.com/tag': 'Pinterest',
+    'px.ads.linkedin.com': 'LinkedIn',
+    'linkedin.com/insight': 'LinkedIn',
+    'snap.licdn.com': 'LinkedIn',
+    'sc-static.net': 'Snapchat',
+    'tr.snapchat.com': 'Snapchat',
+    'us-central1-ct.snap.com': 'Snapchat',
+    'ads.reddit.com': 'Reddit',
+    'alb.reddit.com': 'Reddit',
+    'events.reddit.com': 'Reddit',
+    'analytics.tiktok.com': 'TikTok',
+    'business-api.tiktok.com': 'TikTok',
+    'tiktok.com/analytics': 'TikTok',
+    'www.tiktok.com/api': 'TikTok',
+    'analytics.twitter.com': 'Twitter / X',
+    'ads-api.twitter.com': 'Twitter / X',
+    'twitter.com/i/adsct': 'Twitter / X',
+    '//t.co/': 'Twitter / X',
+    'criteo.com': 'Criteo',
+    'criteo.net': 'Criteo',
+    'taboola.com': 'Taboola',
+    'outbrain.com': 'Outbrain',
+    'klaviyo.com': 'Klaviyo',
+    'attn.tv': 'Attentive',
+    'attentivemobile.com': 'Attentive',
+    'tp.media': 'Affiliate',
+    'impact.com': 'Affiliate',
+    'linksynergy.com': 'Affiliate',
+    'shareasale.com': 'Affiliate',
+};
+
+function getCategory(matchedRule) {
+    return CATEGORY_MAP[matchedRule] || matchedRule;
+}
+
+/* ── Form submit ────────────────────────────────────────── */
+scanForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const url = urlInput.value.trim();
+    if (!url) return;
+
+    // Transition to scanning state
+    searchSection.classList.add('top');
+    scanBtn.disabled = true;
+    scanBtn.textContent = 'Scanning...';
+    progressSection.classList.remove('hidden');
+    resultsSection.classList.add('hidden');
+    progressFill.style.width = '0%';
+    progressFill.style.background = 'linear-gradient(90deg, var(--accent), #a78bfa)';
+    statusText.textContent = 'Starting scan...';
+    statusText.classList.remove('error');
+    pulseDot.style.display = '';
+
+    try {
+        const res = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            showError(err.error || 'Failed to start scan');
+            return;
+        }
+        const { scan_id } = await res.json();
+        currentScanId = scan_id;
+        connectSSE(scan_id);
+    } catch (err) {
+        showError('Failed to connect: ' + err.message);
+    }
+});
+
+/* ── SSE connection ─────────────────────────────────────── */
+function connectSSE(scanId) {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource('/api/scan/' + scanId + '/stream');
+
+    eventSource.addEventListener('status', (e) => {
+        const data = JSON.parse(e.data);
+        statusText.textContent = data.message;
+        if (data.step && data.total_steps) {
+            const pct = Math.round((data.step / data.total_steps) * 100);
+            progressFill.style.width = pct + '%';
+        }
+    });
+
+    eventSource.addEventListener('complete', (e) => {
+        const result = JSON.parse(e.data);
+        displayResults(result);
+    });
+
+    eventSource.addEventListener('scan_error', (e) => {
+        const data = JSON.parse(e.data);
+        showError(data.message);
+    });
+
+    eventSource.addEventListener('done', () => {
+        eventSource.close();
+        eventSource = null;
+        scanBtn.disabled = false;
+        scanBtn.textContent = 'Scan';
+        pulseDot.style.display = 'none';
+    });
+
+    eventSource.onerror = () => {
+        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+            scanBtn.disabled = false;
+            scanBtn.textContent = 'Scan';
+            pulseDot.style.display = 'none';
+        }
+    };
+}
+
+/* ── Display results ────────────────────────────────────── */
+function displayResults(result) {
+    progressSection.classList.add('hidden');
+    resultsSection.classList.remove('hidden');
+
+    // Verdict banner
+    const banner = document.getElementById('verdict-banner');
+    if (result.still_tracking === 'yes') {
+        banner.className = 'verdict-banner violation';
+        banner.innerHTML = '<span class="icon">&#9888;</span> TRACKING VIOLATIONS DETECTED';
+    } else {
+        banner.className = 'verdict-banner clean';
+        banner.innerHTML = '<span class="icon">&#10003;</span> NO VIOLATIONS DETECTED';
+    }
+
+    // Meta
+    const domain = result.url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    document.getElementById('scan-meta').textContent =
+        domain + '  \u2022  ' + new Date().toLocaleString();
+
+    // Summary cards
+    document.getElementById('val-optout').textContent =
+        result.opt_out_found === 'yes' ? 'Found' : 'Not Found';
+    document.getElementById('detail-optout').textContent =
+        result.opt_out_clicked === 'yes' ? 'Successfully clicked' : 'Could not click';
+
+    document.getElementById('val-before').textContent = result.trackers_before.length;
+    document.getElementById('detail-before').textContent =
+        result.trackers_before.length ? result.trackers_before.join(', ') : 'None detected';
+
+    const afterCount = result.trackers_after.length;
+    document.getElementById('val-after').textContent = afterCount;
+    document.getElementById('val-after').style.color = afterCount > 0 ? 'var(--danger)' : 'var(--success)';
+    document.getElementById('detail-after').textContent =
+        afterCount ? result.trackers_after.join(', ') : 'None detected';
+
+    // Tracker table
+    const flagged = result.flagged_domains || {};
+    const tableCard = document.getElementById('tracker-table-card');
+    const tbody = document.getElementById('tracker-tbody');
+    tbody.innerHTML = '';
+
+    if (Object.keys(flagged).length === 0) {
+        tableCard.classList.add('hidden');
+    } else {
+        tableCard.classList.remove('hidden');
+        // Group by category
+        const groups = {};
+        for (const [domain, info] of Object.entries(flagged)) {
+            const cat = getCategory(info.matched_rule);
+            if (!groups[cat]) groups[cat] = [];
+            groups[cat].push({ domain, count: info.count, rule: info.matched_rule });
+        }
+        // Sort categories, then domains by count
+        for (const cat of Object.keys(groups).sort()) {
+            const catRow = document.createElement('tr');
+            catRow.className = 'category-row';
+            catRow.innerHTML = '<td colspan="3">' + cat + '</td>';
+            tbody.appendChild(catRow);
+
+            groups[cat].sort((a, b) => b.count - a.count);
+            for (const item of groups[cat]) {
+                const row = document.createElement('tr');
+                row.innerHTML =
+                    '<td class="domain-cell">' + item.domain + '</td>' +
+                    '<td class="count-cell">' + item.count + '</td>' +
+                    '<td>' + item.rule + '</td>';
+                tbody.appendChild(row);
+            }
+        }
+    }
+
+    // Screenshots
+    const screenshotsGrid = document.getElementById('screenshots-grid');
+    const imgBefore = document.getElementById('screenshot-before');
+    const imgAfter = document.getElementById('screenshot-after');
+
+    if (result.screenshot_before || result.screenshot_after) {
+        screenshotsGrid.classList.remove('hidden');
+        imgBefore.src = result.screenshot_before ? '/' + result.screenshot_before : '';
+        imgAfter.src = result.screenshot_after ? '/' + result.screenshot_after : '';
+    } else {
+        screenshotsGrid.classList.add('hidden');
+    }
+
+    // PDF button
+    document.getElementById('download-pdf-btn').onclick = () => {
+        window.open('/api/scan/' + currentScanId + '/pdf', '_blank');
+    };
+
+    // Evidence package button (only for violations)
+    const evidenceBtn = document.getElementById('download-evidence-btn');
+    if (result.still_tracking === 'yes') {
+        evidenceBtn.style.display = '';
+        evidenceBtn.onclick = () => {
+            window.open('/api/scan/' + currentScanId + '/evidence', '_blank');
+        };
+    } else {
+        evidenceBtn.style.display = 'none';
+    }
+
+    // New scan button
+    document.getElementById('new-scan-btn').onclick = () => {
+        resultsSection.classList.add('hidden');
+        searchSection.classList.remove('top');
+        urlInput.value = '';
+        urlInput.focus();
+        progressFill.style.width = '0%';
+    };
+}
+
+/* ── Error display ──────────────────────────────────────── */
+function showError(message) {
+    statusText.textContent = 'Error: ' + message;
+    statusText.classList.add('error');
+    progressFill.style.background = 'var(--danger)';
+    progressFill.style.width = '100%';
+    pulseDot.style.display = 'none';
+    scanBtn.disabled = false;
+    scanBtn.textContent = 'Scan';
+}
+</script>
+</body>
+</html>

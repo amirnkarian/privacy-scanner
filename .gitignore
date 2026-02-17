@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+screenshots/
+scan_results.db
+*.zip
+.DS_Store
