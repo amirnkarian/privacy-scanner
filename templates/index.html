@@ -19,6 +19,8 @@
     --danger-bg: rgba(255, 71, 87, 0.12);
     --success: #2ed573;
     --success-bg: rgba(46, 213, 115, 0.12);
+    --warning: #ffa502;
+    --warning-bg: rgba(255, 165, 2, 0.12);
     --border: #2d3148;
     --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
@@ -57,11 +59,39 @@ header .subtitle {
     width: 100%;
     max-width: 640px;
     padding: 1rem;
-    margin-top: 22vh;
+    margin-top: 18vh;
     transition: margin-top 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 #search-section.top { margin-top: 1.5rem; }
 
+/* ── Mode tabs ─────────────────────────────────────────── */
+.mode-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 0.8rem;
+}
+.mode-tab {
+    flex: 1;
+    padding: 0.6rem 1rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: var(--font);
+    text-align: center;
+}
+.mode-tab:first-child { border-radius: 8px 0 0 8px; }
+.mode-tab:last-child { border-radius: 0 8px 8px 0; }
+.mode-tab.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+/* ── Single scan bar ───────────────────────────────────── */
 .search-bar {
     display: flex;
     gap: 0;
@@ -100,7 +130,56 @@ header .subtitle {
 .search-bar button:hover:not(:disabled) { background: var(--accent-hover); }
 .search-bar button:disabled { opacity: 0.6; cursor: not-allowed; }
 
-/* ── Progress section ──────────────────────────────────── */
+/* ── Batch input ───────────────────────────────────────── */
+#batch-input-area {
+    display: none;
+}
+#batch-input-area.active { display: block; }
+#single-input-area.active { display: block; }
+
+.batch-textarea {
+    width: 100%;
+    min-height: 140px;
+    padding: 1rem 1.2rem;
+    font-size: 0.95rem;
+    font-family: var(--mono);
+    background: var(--bg-card);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    color: var(--text-primary);
+    outline: none;
+    resize: vertical;
+    line-height: 1.6;
+}
+.batch-textarea:focus { border-color: var(--accent); }
+.batch-textarea::placeholder { color: var(--text-secondary); font-family: var(--font); }
+
+.batch-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.6rem;
+}
+.batch-count {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+.batch-scan-btn {
+    padding: 0.75rem 2rem;
+    font-size: 1rem;
+    font-weight: 600;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-family: var(--font);
+}
+.batch-scan-btn:hover:not(:disabled) { background: var(--accent-hover); }
+.batch-scan-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── Progress section (shared) ────────────────────────── */
 #progress-section {
     width: 100%;
     max-width: 640px;
@@ -147,7 +226,181 @@ header .subtitle {
     50% { opacity: 1; transform: scale(1.2); }
 }
 
-/* ── Results section ───────────────────────────────────── */
+/* ── Batch progress ───────────────────────────────────── */
+#batch-progress-section {
+    width: 100%;
+    max-width: 960px;
+    padding: 1rem 1rem 0;
+}
+.batch-progress-header {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+}
+.batch-tally {
+    display: flex;
+    gap: 1.5rem;
+    margin-bottom: 0.8rem;
+    font-size: 0.88rem;
+}
+.tally-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.tally-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+.tally-dot.violation { background: var(--danger); }
+.tally-dot.clean { background: var(--success); }
+.tally-dot.remaining { background: var(--text-secondary); }
+
+.batch-domain-status {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.6rem;
+    padding: 0.6rem 0;
+}
+.batch-domain-status .pulse-dot {
+    width: 6px;
+    height: 6px;
+}
+.batch-domain-status .status-text {
+    font-size: 0.85rem;
+}
+
+.stop-btn {
+    padding: 0.5rem 1.2rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: var(--danger);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    font-family: var(--font);
+    margin-top: 0.8rem;
+}
+.stop-btn:hover { opacity: 0.85; }
+.stop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Batch results table ──────────────────────────────── */
+#batch-results-section {
+    width: 100%;
+    max-width: 960px;
+    padding: 0 1rem 3rem;
+}
+
+.batch-summary-banner {
+    padding: 1.2rem 1.5rem;
+    border-radius: 12px;
+    font-size: 1.05rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    margin-bottom: 1.2rem;
+}
+.batch-summary-banner .icon { font-size: 1.3rem; }
+
+.batch-results-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+    margin-bottom: 1.5rem;
+    overflow-x: auto;
+}
+.batch-results-card h3 {
+    font-size: 1rem;
+    margin-bottom: 0.8rem;
+}
+
+.batch-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+}
+.batch-table th {
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.batch-table td {
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid rgba(45, 49, 72, 0.5);
+    vertical-align: middle;
+}
+.batch-table tr:hover td { background: rgba(108, 99, 255, 0.06); }
+
+.badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.badge-fail {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid rgba(255, 71, 87, 0.25);
+}
+.badge-pass {
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid rgba(46, 213, 115, 0.25);
+}
+.badge-error {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border: 1px solid rgba(255, 165, 2, 0.25);
+}
+
+.batch-table .domain-cell {
+    font-family: var(--mono);
+    font-size: 0.84rem;
+}
+.batch-table .categories-cell {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+.batch-table .actions-cell {
+    display: flex;
+    gap: 0.4rem;
+}
+.action-link {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    border-radius: 5px;
+    cursor: pointer;
+    border: none;
+    font-family: var(--font);
+    transition: opacity 0.2s;
+    text-decoration: none;
+}
+.action-link:hover { opacity: 0.8; }
+.action-link-evidence {
+    background: var(--danger);
+    color: #fff;
+}
+.action-link-pdf {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* ── Single-scan results section ──────────────────────── */
 #results-section {
     width: 100%;
     max-width: 960px;
@@ -327,6 +580,7 @@ header .subtitle {
     .summary-grid { grid-template-columns: 1fr; }
     #search-section { margin-top: 12vh; }
     header h1 { font-size: 1.6rem; }
+    .batch-tally { flex-wrap: wrap; gap: 0.8rem; }
 }
 </style>
 </head>
@@ -338,14 +592,33 @@ header .subtitle {
 </header>
 
 <section id="search-section">
-    <form id="scan-form">
-        <div class="search-bar">
-            <input type="text" id="url-input" placeholder="Enter a domain (e.g. kos.com)" autocomplete="off" spellcheck="false" />
-            <button type="submit" id="scan-btn">Scan</button>
+    <!-- Mode tabs -->
+    <div class="mode-tabs">
+        <button class="mode-tab active" id="tab-single" onclick="switchMode('single')">Single Domain</button>
+        <button class="mode-tab" id="tab-batch" onclick="switchMode('batch')">Batch Scan</button>
+    </div>
+
+    <!-- Single domain input -->
+    <div id="single-input-area" class="active">
+        <form id="scan-form">
+            <div class="search-bar">
+                <input type="text" id="url-input" placeholder="Enter a domain (e.g. kos.com)" autocomplete="off" spellcheck="false" />
+                <button type="submit" id="scan-btn">Scan</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Batch input -->
+    <div id="batch-input-area">
+        <textarea class="batch-textarea" id="batch-textarea" placeholder="Enter one domain per line, e.g.&#10;kos.com&#10;drinkag1.com&#10;everlane.com"></textarea>
+        <div class="batch-actions">
+            <span class="batch-count" id="batch-count">0 domains</span>
+            <button class="batch-scan-btn" id="batch-scan-btn" onclick="startBatchScan()">Start Batch Scan</button>
         </div>
-    </form>
+    </div>
 </section>
 
+<!-- Single-scan progress -->
 <section id="progress-section" class="hidden">
     <div class="progress-container">
         <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
@@ -356,6 +629,48 @@ header .subtitle {
     </div>
 </section>
 
+<!-- Batch progress -->
+<section id="batch-progress-section" class="hidden">
+    <div class="batch-progress-header" id="batch-progress-header">Starting batch scan...</div>
+    <div class="progress-bar"><div class="progress-fill" id="batch-progress-fill"></div></div>
+    <div class="batch-tally">
+        <div class="tally-item"><div class="tally-dot violation"></div><span id="tally-violations">0</span> violations</div>
+        <div class="tally-item"><div class="tally-dot clean"></div><span id="tally-clean">0</span> clean</div>
+        <div class="tally-item"><div class="tally-dot remaining"></div><span id="tally-remaining">0</span> remaining</div>
+    </div>
+    <div class="batch-domain-status">
+        <div class="pulse-dot" id="batch-pulse-dot"></div>
+        <p class="status-text" id="batch-status-text">Initializing...</p>
+    </div>
+    <button class="stop-btn" id="stop-btn" onclick="stopBatchScan()">Stop Scanning</button>
+</section>
+
+<!-- Batch results table -->
+<section id="batch-results-section" class="hidden">
+    <div class="batch-summary-banner hidden" id="batch-summary-banner"></div>
+
+    <div class="batch-results-card">
+        <h3>Scan Results</h3>
+        <table class="batch-table">
+            <thead>
+                <tr>
+                    <th>Domain</th>
+                    <th>Status</th>
+                    <th style="text-align:center">Trackers</th>
+                    <th>Categories</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="batch-results-tbody"></tbody>
+        </table>
+    </div>
+
+    <div class="actions">
+        <button class="btn btn-secondary" id="batch-new-scan-btn" onclick="resetToInput()">New Scan</button>
+    </div>
+</section>
+
+<!-- Single-scan results -->
 <section id="results-section" class="hidden">
     <div id="verdict-banner" class="verdict-banner"></div>
     <div class="scan-meta" id="scan-meta"></div>
@@ -407,7 +722,13 @@ header .subtitle {
 <script>
 /* ── State ──────────────────────────────────────────────── */
 let currentScanId = null;
+let currentBatchId = null;
 let eventSource = null;
+let batchEventSource = null;
+let batchViolations = 0;
+let batchClean = 0;
+let batchTotal = 0;
+let currentMode = 'single'; // 'single' or 'batch'
 
 /* ── DOM refs ───────────────────────────────────────────── */
 const scanForm        = document.getElementById('scan-form');
@@ -419,6 +740,8 @@ const resultsSection  = document.getElementById('results-section');
 const progressFill    = document.getElementById('progress-fill');
 const statusText      = document.getElementById('status-text');
 const pulseDot        = document.getElementById('pulse-dot');
+const batchTextarea   = document.getElementById('batch-textarea');
+const batchCountEl    = document.getElementById('batch-count');
 
 /* ── Category mapping for grouping tracker domains ────── */
 const CATEGORY_MAP = {
@@ -479,18 +802,45 @@ function getCategory(matchedRule) {
     return CATEGORY_MAP[matchedRule] || matchedRule;
 }
 
-/* ── Form submit ────────────────────────────────────────── */
+function getCategoriesForResult(result) {
+    const flagged = result.flagged_domains || {};
+    const cats = new Set();
+    for (const info of Object.values(flagged)) {
+        cats.add(getCategory(info.matched_rule));
+    }
+    return Array.from(cats).sort();
+}
+
+/* ── Mode switching ────────────────────────────────────── */
+function switchMode(mode) {
+    currentMode = mode;
+    document.getElementById('tab-single').classList.toggle('active', mode === 'single');
+    document.getElementById('tab-batch').classList.toggle('active', mode === 'batch');
+    document.getElementById('single-input-area').classList.toggle('active', mode === 'single');
+    document.getElementById('single-input-area').style.display = mode === 'single' ? 'block' : 'none';
+    document.getElementById('batch-input-area').classList.toggle('active', mode === 'batch');
+    document.getElementById('batch-input-area').style.display = mode === 'batch' ? 'block' : 'none';
+}
+
+/* ── Batch domain counter ──────────────────────────────── */
+batchTextarea.addEventListener('input', () => {
+    const lines = batchTextarea.value.split('\n').filter(l => l.trim());
+    batchCountEl.textContent = lines.length + ' domain' + (lines.length !== 1 ? 's' : '');
+});
+
+/* ── Single-scan form submit ───────────────────────────── */
 scanForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const url = urlInput.value.trim();
     if (!url) return;
 
-    // Transition to scanning state
     searchSection.classList.add('top');
     scanBtn.disabled = true;
     scanBtn.textContent = 'Scanning...';
     progressSection.classList.remove('hidden');
     resultsSection.classList.add('hidden');
+    batchResultsSection().classList.add('hidden');
+    batchProgressSection().classList.add('hidden');
     progressFill.style.width = '0%';
     progressFill.style.background = 'linear-gradient(90deg, var(--accent), #a78bfa)';
     statusText.textContent = 'Starting scan...';
@@ -516,7 +866,10 @@ scanForm.addEventListener('submit', async (e) => {
     }
 });
 
-/* ── SSE connection ─────────────────────────────────────── */
+function batchResultsSection() { return document.getElementById('batch-results-section'); }
+function batchProgressSection() { return document.getElementById('batch-progress-section'); }
+
+/* ── SSE connection (single scan) ──────────────────────── */
 function connectSSE(scanId) {
     if (eventSource) eventSource.close();
     eventSource = new EventSource('/api/scan/' + scanId + '/stream');
@@ -557,7 +910,245 @@ function connectSSE(scanId) {
     };
 }
 
-/* ── Display results ────────────────────────────────────── */
+/* ── Batch scan ────────────────────────────────────────── */
+async function startBatchScan() {
+    const lines = batchTextarea.value.split('\n').map(l => l.trim()).filter(l => l);
+    if (lines.length === 0) return;
+
+    batchTotal = lines.length;
+    batchViolations = 0;
+    batchClean = 0;
+
+    // UI transitions
+    searchSection.classList.add('top');
+    document.getElementById('batch-scan-btn').disabled = true;
+    resultsSection.classList.add('hidden');
+    progressSection.classList.add('hidden');
+
+    // Show batch progress
+    const bpSection = batchProgressSection();
+    bpSection.classList.remove('hidden');
+    document.getElementById('batch-progress-header').textContent = 'Starting batch scan...';
+    document.getElementById('batch-progress-fill').style.width = '0%';
+    document.getElementById('batch-progress-fill').style.background = 'linear-gradient(90deg, var(--accent), #a78bfa)';
+    document.getElementById('tally-violations').textContent = '0';
+    document.getElementById('tally-clean').textContent = '0';
+    document.getElementById('tally-remaining').textContent = batchTotal;
+    document.getElementById('batch-status-text').textContent = 'Initializing...';
+    document.getElementById('batch-pulse-dot').style.display = '';
+    document.getElementById('stop-btn').disabled = false;
+
+    // Show results table (empty)
+    const brSection = batchResultsSection();
+    brSection.classList.remove('hidden');
+    document.getElementById('batch-results-tbody').innerHTML = '';
+    document.getElementById('batch-summary-banner').classList.add('hidden');
+
+    try {
+        const res = await fetch('/api/batch-scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: lines })
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            document.getElementById('batch-status-text').textContent = 'Error: ' + (err.error || 'Failed to start');
+            document.getElementById('batch-pulse-dot').style.display = 'none';
+            document.getElementById('batch-scan-btn').disabled = false;
+            return;
+        }
+        const { batch_id } = await res.json();
+        currentBatchId = batch_id;
+        connectBatchSSE(batch_id);
+    } catch (err) {
+        document.getElementById('batch-status-text').textContent = 'Error: ' + err.message;
+        document.getElementById('batch-pulse-dot').style.display = 'none';
+        document.getElementById('batch-scan-btn').disabled = false;
+    }
+}
+
+function connectBatchSSE(batchId) {
+    if (batchEventSource) batchEventSource.close();
+    batchEventSource = new EventSource('/api/batch-scan/' + batchId + '/stream');
+
+    batchEventSource.addEventListener('batch_status', (e) => {
+        const data = JSON.parse(e.data);
+        const idx = data.current_index + 1;
+        const domain = data.current_url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        document.getElementById('batch-progress-header').textContent =
+            'Scanning ' + idx + ' of ' + data.total + ' \u2014 ' + domain;
+        document.getElementById('batch-status-text').textContent = data.message;
+
+        // Overall progress: combine domain progress with batch progress
+        const domainPct = (data.step && data.total_steps) ? (data.step / data.total_steps) : 0;
+        const overallPct = ((data.current_index + domainPct) / data.total) * 100;
+        document.getElementById('batch-progress-fill').style.width = Math.round(overallPct) + '%';
+    });
+
+    batchEventSource.addEventListener('domain_complete', (e) => {
+        const data = JSON.parse(e.data);
+        const result = data.result;
+        const scanId = data.scan_id;
+
+        if (result.still_tracking === 'yes') {
+            batchViolations++;
+        } else if (result.still_tracking === 'error') {
+            // count errors separately — don't increment clean
+        } else {
+            batchClean++;
+        }
+
+        const remaining = batchTotal - batchViolations - batchClean;
+        document.getElementById('tally-violations').textContent = batchViolations;
+        document.getElementById('tally-clean').textContent = batchClean;
+        document.getElementById('tally-remaining').textContent = Math.max(0, remaining);
+
+        addBatchResultRow(data.url, scanId, result);
+    });
+
+    batchEventSource.addEventListener('batch_complete', (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('batch-pulse-dot').style.display = 'none';
+        document.getElementById('stop-btn').disabled = true;
+        document.getElementById('batch-scan-btn').disabled = false;
+        document.getElementById('batch-progress-fill').style.width = '100%';
+
+        if (data.stopped) {
+            document.getElementById('batch-progress-header').textContent = 'Batch scan stopped';
+            document.getElementById('batch-status-text').textContent = 'Stopped by user';
+        } else {
+            document.getElementById('batch-progress-header').textContent = 'Batch scan complete';
+            document.getElementById('batch-status-text').textContent = 'All domains scanned';
+        }
+
+        // Show summary banner
+        const banner = document.getElementById('batch-summary-banner');
+        const total = data.violations + data.clean;
+        const pct = total > 0 ? Math.round((data.violations / total) * 100) : 0;
+        banner.classList.remove('hidden');
+
+        if (data.violations > 0) {
+            banner.className = 'batch-summary-banner';
+            banner.style.background = 'var(--danger-bg)';
+            banner.style.color = 'var(--danger)';
+            banner.style.border = '1px solid rgba(255, 71, 87, 0.25)';
+            banner.innerHTML = '<span class="icon">&#9888;</span> Batch Complete: ' +
+                data.violations + ' of ' + total + ' domains (' + pct + '%) have tracking violations';
+        } else {
+            banner.className = 'batch-summary-banner';
+            banner.style.background = 'var(--success-bg)';
+            banner.style.color = 'var(--success)';
+            banner.style.border = '1px solid rgba(46, 213, 115, 0.25)';
+            banner.innerHTML = '<span class="icon">&#10003;</span> Batch Complete: All ' +
+                total + ' domains are clean';
+        }
+
+        if (data.stopped) {
+            banner.innerHTML += ' (scan was stopped early)';
+        }
+    });
+
+    batchEventSource.addEventListener('batch_error', (e) => {
+        const data = JSON.parse(e.data);
+        document.getElementById('batch-status-text').textContent = 'Error: ' + data.message;
+        document.getElementById('batch-pulse-dot').style.display = 'none';
+        document.getElementById('batch-scan-btn').disabled = false;
+    });
+
+    batchEventSource.addEventListener('done', () => {
+        batchEventSource.close();
+        batchEventSource = null;
+    });
+
+    batchEventSource.onerror = () => {
+        if (batchEventSource && batchEventSource.readyState === EventSource.CLOSED) {
+            document.getElementById('batch-scan-btn').disabled = false;
+            document.getElementById('batch-pulse-dot').style.display = 'none';
+        }
+    };
+}
+
+function addBatchResultRow(url, scanId, result) {
+    const tbody = document.getElementById('batch-results-tbody');
+    const domain = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const row = document.createElement('tr');
+
+    let statusBadge, trackerCount, categories, actions;
+
+    if (result.still_tracking === 'error') {
+        statusBadge = '<span class="badge badge-error">ERROR</span>';
+        trackerCount = '--';
+        categories = result.error || 'Scan failed';
+        actions = '';
+    } else if (result.still_tracking === 'yes') {
+        statusBadge = '<span class="badge badge-fail">FAIL</span>';
+        trackerCount = result.trackers_after ? result.trackers_after.length : 0;
+        const cats = getCategoriesForResult(result);
+        categories = cats.length > 0 ? cats.join(', ') : '--';
+        actions = '<button class="action-link action-link-evidence" onclick="window.open(\'/api/scan/' + scanId + '/evidence\', \'_blank\')">Evidence</button>' +
+                  '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
+    } else {
+        statusBadge = '<span class="badge badge-pass">PASS</span>';
+        trackerCount = '0';
+        categories = '--';
+        actions = '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
+    }
+
+    row.innerHTML =
+        '<td class="domain-cell">' + domain + '</td>' +
+        '<td>' + statusBadge + '</td>' +
+        '<td style="text-align:center; font-weight:600">' + trackerCount + '</td>' +
+        '<td class="categories-cell">' + categories + '</td>' +
+        '<td><div class="actions-cell">' + actions + '</div></td>';
+
+    // Sort: FAIL first, then ERROR, then PASS
+    row.dataset.status = result.still_tracking === 'yes' ? '0' : (result.still_tracking === 'error' ? '1' : '2');
+
+    // Insert in sorted position
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    let inserted = false;
+    for (const existingRow of rows) {
+        if (row.dataset.status < existingRow.dataset.status) {
+            tbody.insertBefore(row, existingRow);
+            inserted = true;
+            break;
+        }
+    }
+    if (!inserted) tbody.appendChild(row);
+}
+
+async function stopBatchScan() {
+    if (!currentBatchId) return;
+    document.getElementById('stop-btn').disabled = true;
+    document.getElementById('batch-status-text').textContent = 'Stopping after current domain...';
+
+    try {
+        await fetch('/api/batch-scan/' + currentBatchId + '/stop', { method: 'POST' });
+    } catch (err) {
+        // Ignore — batch will stop on its own
+    }
+}
+
+/* ── Reset to input ────────────────────────────────────── */
+function resetToInput() {
+    resultsSection.classList.add('hidden');
+    batchResultsSection().classList.add('hidden');
+    batchProgressSection().classList.add('hidden');
+    progressSection.classList.add('hidden');
+    searchSection.classList.remove('top');
+    urlInput.value = '';
+    batchTextarea.value = '';
+    batchCountEl.textContent = '0 domains';
+    progressFill.style.width = '0%';
+    document.getElementById('batch-summary-banner').classList.add('hidden');
+    if (currentMode === 'single') {
+        urlInput.focus();
+    } else {
+        batchTextarea.focus();
+    }
+}
+
+/* ── Display single-scan results ───────────────────────── */
 function displayResults(result) {
     progressSection.classList.add('hidden');
     resultsSection.classList.remove('hidden');
@@ -603,14 +1194,12 @@ function displayResults(result) {
         tableCard.classList.add('hidden');
     } else {
         tableCard.classList.remove('hidden');
-        // Group by category
         const groups = {};
         for (const [domain, info] of Object.entries(flagged)) {
             const cat = getCategory(info.matched_rule);
             if (!groups[cat]) groups[cat] = [];
             groups[cat].push({ domain, count: info.count, rule: info.matched_rule });
         }
-        // Sort categories, then domains by count
         for (const cat of Object.keys(groups).sort()) {
             const catRow = document.createElement('tr');
             catRow.className = 'category-row';
@@ -659,13 +1248,7 @@ function displayResults(result) {
     }
 
     // New scan button
-    document.getElementById('new-scan-btn').onclick = () => {
-        resultsSection.classList.add('hidden');
-        searchSection.classList.remove('top');
-        urlInput.value = '';
-        urlInput.focus();
-        progressFill.style.width = '0%';
-    };
+    document.getElementById('new-scan-btn').onclick = resetToInput;
 }
 
 /* ── Error display ──────────────────────────────────────── */
@@ -678,6 +1261,9 @@ function showError(message) {
     scanBtn.disabled = false;
     scanBtn.textContent = 'Scan';
 }
+
+/* ── Init: set single mode visible ─────────────────────── */
+switchMode('single');
 </script>
 </body>
 </html>

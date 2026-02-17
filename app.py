@@ -30,6 +30,7 @@ app = Flask(__name__)
 # Key: scan_id  Value: { queue, thread, result, error, done }
 # ────────────────────────────────────────────────────────────────────
 active_scans = {}
+active_batch_scans = {}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -332,6 +333,197 @@ def download_evidence(scan_id):
         mimetype="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ────────────────────────────────────────────────────────────────────
+# BATCH SCANNING
+# ────────────────────────────────────────────────────────────────────
+
+@app.route("/api/batch-scan", methods=["POST"])
+def start_batch_scan():
+    """
+    Start a batch privacy scan for multiple domains.
+
+    Expects JSON: {"urls": ["kos.com", "drinkag1.com", ...]}
+    Returns JSON: {"batch_id": "..."}
+    """
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls", [])
+
+    # Filter empty strings and normalize
+    urls = [scanner.normalize_url(u.strip()) for u in urls if u.strip()]
+    if not urls:
+        return jsonify({"error": "At least one URL is required"}), 400
+
+    batch_id = str(uuid.uuid4())
+    q = Queue()
+
+    active_batch_scans[batch_id] = {
+        "queue": q,
+        "urls": urls,
+        "results": {},
+        "scan_ids": {},
+        "current_index": 0,
+        "stop_requested": False,
+        "done": False,
+    }
+
+    def run_batch():
+        violations = 0
+        clean = 0
+        try:
+            database.init_db()
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                for i, url in enumerate(urls):
+                    if active_batch_scans[batch_id]["stop_requested"]:
+                        break
+
+                    active_batch_scans[batch_id]["current_index"] = i
+
+                    # Notify: starting this domain
+                    q.put({
+                        "event": "batch_status",
+                        "data": {
+                            "current_url": url,
+                            "current_index": i,
+                            "total": len(urls),
+                            "message": f"Starting scan of {url}",
+                            "step": 0,
+                            "total_steps": 17,
+                        },
+                    })
+
+                    # Create a scan_id so evidence/PDF routes work
+                    scan_id = str(uuid.uuid4())
+
+                    def status_callback(message, step, total_steps, _url=url, _i=i):
+                        q.put({
+                            "event": "batch_status",
+                            "data": {
+                                "current_url": _url,
+                                "current_index": _i,
+                                "total": len(urls),
+                                "message": message,
+                                "step": step,
+                                "total_steps": total_steps,
+                            },
+                        })
+
+                    try:
+                        result = scanner.scan_url(browser, url, status_callback=status_callback)
+
+                        # Store in active_scans so existing evidence/PDF routes work
+                        active_scans[scan_id] = {
+                            "queue": Queue(),
+                            "result": result,
+                            "error": None,
+                            "done": True,
+                        }
+
+                        active_batch_scans[batch_id]["results"][url] = result
+                        active_batch_scans[batch_id]["scan_ids"][url] = scan_id
+
+                        if result.get("still_tracking") == "yes":
+                            violations += 1
+                        else:
+                            clean += 1
+
+                        q.put({
+                            "event": "domain_complete",
+                            "data": {
+                                "url": url,
+                                "scan_id": scan_id,
+                                "result": result,
+                            },
+                        })
+
+                    except Exception as e:
+                        q.put({
+                            "event": "domain_complete",
+                            "data": {
+                                "url": url,
+                                "scan_id": None,
+                                "result": {
+                                    "url": url,
+                                    "still_tracking": "error",
+                                    "error": str(e),
+                                },
+                            },
+                        })
+
+                browser.close()
+
+        except Exception as e:
+            q.put({"event": "batch_error", "data": {"message": str(e)}})
+
+        finally:
+            stopped = active_batch_scans[batch_id]["stop_requested"]
+            q.put({
+                "event": "batch_complete",
+                "data": {
+                    "total": len(urls),
+                    "violations": violations,
+                    "clean": clean,
+                    "stopped": stopped,
+                },
+            })
+            active_batch_scans[batch_id]["done"] = True
+            q.put(None)
+
+    thread = threading.Thread(target=run_batch, daemon=True)
+    thread.start()
+    active_batch_scans[batch_id]["thread"] = thread
+
+    return jsonify({"batch_id": batch_id})
+
+
+@app.route("/api/batch-scan/<batch_id>/stream")
+def batch_scan_stream(batch_id):
+    """SSE endpoint for batch scan progress."""
+    if batch_id not in active_batch_scans:
+        return jsonify({"error": "Batch scan not found"}), 404
+
+    def generate():
+        q = active_batch_scans[batch_id]["queue"]
+        while True:
+            try:
+                msg = q.get(timeout=120)
+                if msg is None:
+                    yield f"event: done\ndata: {json.dumps({'status': 'finished'})}\n\n"
+                    break
+                event_type = msg.get("event", "batch_status")
+                data = msg.get("data", {})
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+            except Empty:
+                yield ": keepalive\n\n"
+
+        def cleanup():
+            import time
+            time.sleep(600)
+            active_batch_scans.pop(batch_id, None)
+
+        threading.Thread(target=cleanup, daemon=True).start()
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.route("/api/batch-scan/<batch_id>/stop", methods=["POST"])
+def stop_batch_scan(batch_id):
+    """Request a batch scan to stop after the current domain finishes."""
+    if batch_id not in active_batch_scans:
+        return jsonify({"error": "Batch scan not found"}), 404
+
+    active_batch_scans[batch_id]["stop_requested"] = True
+    return jsonify({"status": "stopping"})
 
 
 # ────────────────────────────────────────────────────────────────────
