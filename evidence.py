@@ -137,100 +137,399 @@ def _sanitize_for_pdf(text):
 
 
 # ────────────────────────────────────────────────────────────────────
-# IMAGE GENERATION (Pillow)
+# IMAGE GENERATION — Chrome DevTools Style (Pillow)
 # ────────────────────────────────────────────────────────────────────
 
-# Colors matching the web UI dark theme.
-BG_COLOR = (15, 17, 23)
+# Chrome DevTools dark theme colors.
+DT_BG = (36, 36, 36)
+DT_BG_ALT = (42, 42, 42)
+DT_TEXT = (212, 212, 212)
+DT_TEXT_DIM = (136, 136, 136)
+DT_TEXT_URL = (117, 163, 209)
+DT_BORDER = (60, 60, 60)
+DT_SELECTED = (37, 63, 98)
+DT_TAB_BG = (28, 28, 28)
+DT_TAB_ACTIVE = (36, 36, 36)
+DT_FILTER_BG = (50, 50, 50)
+DT_FILTER_BORDER = (70, 70, 70)
+DT_STATUS_BAR_BG = (28, 28, 28)
+DT_GREEN = (95, 195, 109)
+DT_TAB_UNDERLINE = (59, 130, 246)
+
+# Legacy colors kept for PDF report.
 HEADER_BG = (34, 38, 57)
-ROW_ALT = (22, 25, 35)
-ROW_NORMAL = (15, 17, 23)
-TEXT_COLOR = (220, 220, 230)
-HEADER_TEXT = (255, 255, 255)
-ACCENT_RED = (255, 71, 87)
-ACCENT_PURPLE = (108, 99, 255)
-BORDER_COLOR = (50, 55, 75)
 
 
-def _draw_table_image(title, headers, rows, output_path, col_widths=None):
+def _load_fonts():
+    """Load monospace fonts with cross-platform fallbacks."""
+    mono_paths = [
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Library/Fonts/Monaco.dfont",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    ]
+    fonts = {}
+    for path in mono_paths:
+        try:
+            fonts["11"] = ImageFont.truetype(path, 11)
+            fonts["12"] = ImageFont.truetype(path, 12)
+            fonts["13"] = ImageFont.truetype(path, 13)
+            fonts["10"] = ImageFont.truetype(path, 10)
+            break
+        except Exception:
+            continue
+    if "12" not in fonts:
+        default = ImageFont.load_default()
+        fonts = {"10": default, "11": default, "12": default, "13": default}
+    return fonts
+
+
+def _count_cookies_for_domain(request_url, cookies):
+    """Count cookies that would be sent with a request to this domain."""
+    req_domain = urlparse(request_url).netloc
+    count = 0
+    for cookie in cookies:
+        cd = cookie.get("domain", "").lstrip(".")
+        if cd in req_domain or req_domain.endswith("." + cd):
+            count += 1
+    return count
+
+
+def _format_size(nbytes):
+    """Format byte count for display."""
+    if nbytes <= 0:
+        return "--"
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    return f"{nbytes / 1024:.1f} kB"
+
+
+def _format_time(timestamp, first_timestamp):
+    """Format relative time from first request."""
+    delta = timestamp - first_timestamp
+    if delta < 0.001:
+        return "0 ms"
+    if delta < 1.0:
+        return f"{int(delta * 1000)} ms"
+    return f"{delta:.1f} s"
+
+
+def _truncate(text, max_chars):
+    """Truncate text with ellipsis."""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 2] + ".."
+
+
+def _draw_devtools_network_panel(tracker_name, requests, cookies_after,
+                                  panel_width, panel_height):
     """
-    Render a data table as a dark-themed PNG image.
-
-    Args:
-        title:      Title text shown above the table.
-        headers:    List of column header strings.
-        rows:       List of lists (each inner list = one row).
-        output_path: Where to save the PNG.
-        col_widths: Optional list of pixel widths per column.
+    Draw a fake Chrome DevTools Network tab panel.
+    Returns a PIL Image.
     """
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/SFNSMono.ttf", 14)
-        font_bold = ImageFont.truetype("/System/Library/Fonts/SFNSMono.ttf", 14)
-        title_font = ImageFont.truetype("/System/Library/Fonts/SFNSMono.ttf", 18)
-    except Exception:
-        font = ImageFont.load_default()
-        font_bold = font
-        title_font = font
-
-    row_height = 30
-    padding = 12
-    title_height = 50
-
-    if col_widths is None:
-        col_widths = [max(200, 1200 // len(headers))] * len(headers)
-
-    width = sum(col_widths) + padding * 2
-    height = title_height + (len(rows) + 1) * row_height + padding * 2
-
-    img = Image.new("RGB", (width, height), color=BG_COLOR)
+    fonts = _load_fonts()
+    img = Image.new("RGB", (panel_width, panel_height), DT_BG)
     draw = ImageDraw.Draw(img)
 
-    # Title.
-    draw.text((padding, 12), title, fill=ACCENT_PURPLE, font=title_font)
+    # ── Tab bar (28px) ────────────────────────────────────────────
+    tab_h = 28
+    draw.rectangle([0, 0, panel_width, tab_h], fill=DT_TAB_BG)
 
-    y = title_height
+    tabs = ["Elements", "Console", "Sources", "Network", "Performance"]
+    tx = 8
+    for tab in tabs:
+        is_active = tab == "Network"
+        color = DT_TEXT if is_active else DT_TEXT_DIM
+        draw.text((tx, 7), tab, fill=color, font=fonts["12"])
+        tw = fonts["12"].getlength(tab) if hasattr(fonts["12"], "getlength") else len(tab) * 7
+        if is_active:
+            draw.rectangle([tx - 4, 0, tx + tw + 4, tab_h], fill=DT_TAB_ACTIVE)
+            draw.text((tx, 7), tab, fill=DT_TEXT, font=fonts["12"])
+            draw.rectangle([tx - 4, tab_h - 2, tx + tw + 4, tab_h], fill=DT_TAB_UNDERLINE)
+        tx += int(tw) + 20
 
-    # Header row.
-    draw.rectangle([0, y, width, y + row_height], fill=HEADER_BG)
-    x = padding
-    for i, header in enumerate(headers):
-        draw.text((x, y + 7), header, fill=HEADER_TEXT, font=font_bold)
-        x += col_widths[i]
-    y += row_height
+    # ── Filter bar (32px) ─────────────────────────────────────────
+    filter_y = tab_h
+    filter_h = 32
+    draw.rectangle([0, filter_y, panel_width, filter_y + filter_h], fill=DT_BG)
 
-    # Draw a line under header.
-    draw.line([0, y, width, y], fill=BORDER_COLOR, width=1)
+    # Filter input box.
+    fx, fy = 8, filter_y + 5
+    fw, fh = min(200, panel_width - 16), 22
+    draw.rounded_rectangle([fx, fy, fx + fw, fy + fh], radius=3,
+                           fill=DT_FILTER_BG, outline=DT_FILTER_BORDER)
+    # Magnifying glass (simple circle + line).
+    mx, my = fx + 10, fy + 7
+    draw.ellipse([mx, my, mx + 8, my + 8], outline=DT_TEXT_DIM, width=1)
+    draw.line([mx + 7, my + 7, mx + 10, my + 10], fill=DT_TEXT_DIM, width=1)
+    # Filter text.
+    filter_text = tracker_name.lower()
+    draw.text((fx + 24, fy + 4), filter_text, fill=DT_TEXT, font=fonts["11"])
 
-    # Data rows.
-    for row_idx, row in enumerate(rows):
-        bg = ROW_ALT if row_idx % 2 == 0 else ROW_NORMAL
-        draw.rectangle([0, y, width, y + row_height], fill=bg)
-        x = padding
-        for i, cell in enumerate(row):
-            cell_str = str(cell)
-            # Truncate if too wide.
-            max_chars = col_widths[i] // 8
-            if len(cell_str) > max_chars:
-                cell_str = cell_str[: max_chars - 3] + "..."
-            color = TEXT_COLOR
-            # Highlight known tracking cookie names in red.
-            if i == 0 and cell_str in KNOWN_TRACKING_COOKIES:
-                color = ACCENT_RED
-            draw.text((x, y + 7), cell_str, fill=color, font=font)
-            x += col_widths[i]
-        y += row_height
+    # Type filter buttons.
+    type_filters = ["All", "Fetch/XHR", "JS", "CSS", "Img", "Font"]
+    bx = fx + fw + 12
+    for i, label in enumerate(type_filters):
+        color = DT_TEXT if i == 0 else DT_TEXT_DIM
+        draw.text((bx, fy + 4), label, fill=color, font=fonts["10"])
+        bx += int(fonts["10"].getlength(label) if hasattr(fonts["10"], "getlength") else len(label) * 6) + 10
 
-    img.save(output_path)
+    # ── Column headers (24px) ─────────────────────────────────────
+    hdr_y = filter_y + filter_h
+    hdr_h = 24
+    draw.rectangle([0, hdr_y, panel_width, hdr_y + hdr_h], fill=DT_BG_ALT)
+
+    # Column layout.
+    col_pcts = [0.32, 0.20, 0.10, 0.14, 0.08, 0.08, 0.08]
+    col_names = ["Name", "Domain", "Type", "Initiator", "Cookies", "Size", "Time"]
+    col_widths = [int(panel_width * p) for p in col_pcts]
+    # Adjust last column to fill remaining space.
+    col_widths[-1] = panel_width - sum(col_widths[:-1])
+
+    cx = 0
+    for i, name in enumerate(col_names):
+        draw.text((cx + 6, hdr_y + 5), name, fill=DT_TEXT_DIM, font=fonts["11"])
+        cx += col_widths[i]
+        if i < len(col_names) - 1:
+            draw.line([cx, hdr_y, cx, hdr_y + hdr_h], fill=DT_BORDER, width=1)
+
+    # Bottom border.
+    draw.line([0, hdr_y + hdr_h, panel_width, hdr_y + hdr_h], fill=DT_BORDER, width=1)
+
+    # ── Data rows (22px each) ─────────────────────────────────────
+    row_h = 22
+    data_y = hdr_y + hdr_h
+    status_bar_h = 24
+
+    first_ts = requests[0].get("timestamp", 0) if requests else 0
+    max_rows = (panel_height - data_y - status_bar_h) // row_h
+
+    for row_idx, req in enumerate(requests[:max_rows]):
+        ry = data_y + row_idx * row_h
+
+        # Row background.
+        if row_idx == 0:
+            bg = DT_SELECTED
+        elif row_idx % 2 == 0:
+            bg = DT_BG
+        else:
+            bg = DT_BG_ALT
+        draw.rectangle([0, ry, panel_width, ry + row_h], fill=bg)
+
+        # Parse request data.
+        parsed = urlparse(req["url"])
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query[:20]
+        req_domain = parsed.netloc
+        resource_type = req.get("resource_type", "other")
+        initiator = urlparse(req.get("headers", {}).get("referer", "")).netloc or "Other"
+        cookie_count = _count_cookies_for_domain(req["url"], cookies_after)
+        size = _format_size(req.get("post_data_length", 0))
+        ts = req.get("timestamp", first_ts)
+        time_str = _format_time(ts, first_ts)
+
+        cells = [
+            (_truncate(path, col_widths[0] // 7), DT_TEXT_URL),
+            (_truncate(req_domain, col_widths[1] // 7), DT_TEXT),
+            (_truncate(resource_type, col_widths[2] // 7), DT_TEXT),
+            (_truncate(initiator, col_widths[3] // 7), DT_TEXT),
+            (str(cookie_count), DT_TEXT),
+            (size, DT_TEXT),
+            (time_str, DT_TEXT),
+        ]
+
+        cx = 0
+        for i, (text, color) in enumerate(cells):
+            draw.text((cx + 6, ry + 4), text, fill=color, font=fonts["11"])
+            cx += col_widths[i]
+            if i < len(cells) - 1:
+                draw.line([cx, ry, cx, ry + row_h], fill=DT_BORDER, width=1)
+
+        # Row bottom border.
+        draw.line([0, ry + row_h, panel_width, ry + row_h], fill=DT_BORDER, width=1)
+
+    # ── Status bar (24px) ─────────────────────────────────────────
+    status_y = panel_height - status_bar_h
+    draw.rectangle([0, status_y, panel_width, panel_height], fill=DT_STATUS_BAR_BG)
+    draw.line([0, status_y, panel_width, status_y], fill=DT_BORDER, width=1)
+    draw.text((8, status_y + 5),
+              f"{len(requests)} requests",
+              fill=DT_TEXT_DIM, font=fonts["11"])
+
+    return img
+
+
+def _draw_devtools_cookies_panel(tracking_cookies, cookies_after):
+    """
+    Draw a fake Chrome DevTools Application > Cookies panel.
+    Returns a PIL Image.
+    """
+    fonts = _load_fonts()
+
+    width = 1400
+    tab_h = 28
+    filter_h = 32
+    hdr_h = 24
+    row_h = 22
+    status_h = 24
+    data_rows = min(len(tracking_cookies), 40)
+    height = tab_h + filter_h + hdr_h + data_rows * row_h + status_h + 10
+
+    img = Image.new("RGB", (width, height), DT_BG)
+    draw = ImageDraw.Draw(img)
+
+    # ── Tab bar ───────────────────────────────────────────────────
+    draw.rectangle([0, 0, width, tab_h], fill=DT_TAB_BG)
+    tabs = ["Elements", "Console", "Sources", "Network", "Performance", "Application"]
+    tx = 8
+    for tab in tabs:
+        is_active = tab == "Application"
+        color = DT_TEXT if is_active else DT_TEXT_DIM
+        tw = fonts["12"].getlength(tab) if hasattr(fonts["12"], "getlength") else len(tab) * 7
+        if is_active:
+            draw.rectangle([tx - 4, 0, tx + tw + 4, tab_h], fill=DT_TAB_ACTIVE)
+            draw.text((tx, 7), tab, fill=DT_TEXT, font=fonts["12"])
+            draw.rectangle([tx - 4, tab_h - 2, tx + tw + 4, tab_h], fill=DT_TAB_UNDERLINE)
+        else:
+            draw.text((tx, 7), tab, fill=color, font=fonts["12"])
+        tx += int(tw) + 20
+
+    # ── Filter bar ────────────────────────────────────────────────
+    fy = tab_h
+    draw.rectangle([0, fy, width, fy + filter_h], fill=DT_BG)
+    # Sidebar label.
+    draw.text((8, fy + 8), "Cookies >", fill=DT_TEXT_DIM, font=fonts["11"])
+    # Filter input.
+    fx = 100
+    draw.rounded_rectangle([fx, fy + 5, fx + 200, fy + 27], radius=3,
+                           fill=DT_FILTER_BG, outline=DT_FILTER_BORDER)
+    draw.text((fx + 8, fy + 9), "Tracking Cookies", fill=DT_TEXT, font=fonts["11"])
+
+    # ── Column headers ────────────────────────────────────────────
+    hy = fy + filter_h
+    draw.rectangle([0, hy, width, hy + hdr_h], fill=DT_BG_ALT)
+
+    col_pcts = [0.13, 0.18, 0.17, 0.07, 0.15, 0.07, 0.07, 0.07, 0.09]
+    col_names = ["Name", "Value", "Domain", "Path", "Expires", "Size", "HttpOnly", "Secure", "SameSite"]
+    col_widths = [int(width * p) for p in col_pcts]
+    col_widths[-1] = width - sum(col_widths[:-1])
+
+    cx = 0
+    for i, name in enumerate(col_names):
+        draw.text((cx + 6, hy + 5), name, fill=DT_TEXT_DIM, font=fonts["11"])
+        cx += col_widths[i]
+        if i < len(col_names) - 1:
+            draw.line([cx, hy, cx, hy + hdr_h], fill=DT_BORDER, width=1)
+    draw.line([0, hy + hdr_h, width, hy + hdr_h], fill=DT_BORDER, width=1)
+
+    # ── Data rows ─────────────────────────────────────────────────
+    data_y = hy + hdr_h
+    for row_idx, cookie in enumerate(tracking_cookies[:40]):
+        ry = data_y + row_idx * row_h
+        bg = DT_BG if row_idx % 2 == 0 else DT_BG_ALT
+        if row_idx == 0:
+            bg = DT_SELECTED
+        draw.rectangle([0, ry, width, ry + row_h], fill=bg)
+
+        name = cookie.get("name", "")
+        value = cookie.get("value", "")
+        if len(value) > 15:
+            value = value[:12] + "..."
+        domain = cookie.get("domain", "")
+        path = cookie.get("path", "/")
+        expires = cookie.get("expires", -1)
+        if expires and expires > 0:
+            try:
+                exp_str = datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                exp_str = "Session"
+        else:
+            exp_str = "Session"
+        size_val = len(name) + len(str(cookie.get("value", "")))
+        http_only = cookie.get("httpOnly", False)
+        secure = cookie.get("secure", False)
+        same_site = cookie.get("sameSite", "None")
+
+        cells = [
+            (_truncate(name, col_widths[0] // 7), DT_TEXT_URL),
+            (_truncate(value, col_widths[1] // 7), DT_TEXT),
+            (_truncate(domain, col_widths[2] // 7), DT_TEXT),
+            (_truncate(path, col_widths[3] // 7), DT_TEXT),
+            (_truncate(exp_str, col_widths[4] // 7), DT_TEXT),
+            (str(size_val), DT_TEXT),
+            ("✓" if http_only else "", DT_GREEN if http_only else DT_TEXT_DIM),
+            ("✓" if secure else "", DT_GREEN if secure else DT_TEXT_DIM),
+            (str(same_site), DT_TEXT),
+        ]
+
+        cx = 0
+        for i, (text, color) in enumerate(cells):
+            draw.text((cx + 6, ry + 4), text, fill=color, font=fonts["11"])
+            cx += col_widths[i]
+            if i < len(cells) - 1:
+                draw.line([cx, ry, cx, ry + row_h], fill=DT_BORDER, width=1)
+        draw.line([0, ry + row_h, width, ry + row_h], fill=DT_BORDER, width=1)
+
+    # ── Status bar ────────────────────────────────────────────────
+    sy = data_y + data_rows * row_h + 5
+    draw.rectangle([0, sy, width, height], fill=DT_STATUS_BAR_BG)
+    draw.line([0, sy, width, sy], fill=DT_BORDER, width=1)
+    draw.text((8, sy + 5),
+              f"{len(tracking_cookies)} cookies",
+              fill=DT_TEXT_DIM, font=fonts["11"])
+
+    return img
+
+
+def _generate_devtools_evidence_image(category_name, requests, cookies_after,
+                                       viewport_screenshot_path, output_path):
+    """
+    Generate a side-by-side composite: product page + DevTools Network panel.
+    """
+    COMPOSITE_WIDTH = 1400
+    LEFT_WIDTH = 770
+    RIGHT_WIDTH = COMPOSITE_WIDTH - LEFT_WIDTH  # 630
+
+    # Load and resize the viewport screenshot.
+    if viewport_screenshot_path and os.path.exists(viewport_screenshot_path):
+        page_img = Image.open(viewport_screenshot_path)
+        scale = LEFT_WIDTH / page_img.width
+        new_height = int(page_img.height * scale)
+        page_img = page_img.resize((LEFT_WIDTH, new_height), Image.LANCZOS)
+    else:
+        new_height = 900
+        page_img = Image.new("RGB", (LEFT_WIDTH, new_height), (50, 50, 50))
+
+    panel_height = max(new_height, 600)
+
+    # Draw the DevTools panel.
+    devtools_img = _draw_devtools_network_panel(
+        category_name, requests, cookies_after,
+        RIGHT_WIDTH, panel_height,
+    )
+
+    # Create composite.
+    composite = Image.new("RGB", (COMPOSITE_WIDTH, panel_height), DT_BG)
+    composite.paste(page_img, (0, 0))
+
+    # Vertical divider.
+    cdraw = ImageDraw.Draw(composite)
+    cdraw.line([(LEFT_WIDTH, 0), (LEFT_WIDTH, panel_height)], fill=DT_BORDER, width=2)
+
+    composite.paste(devtools_img, (LEFT_WIDTH + 2, 0))
+    composite.save(output_path)
 
 
 def generate_network_evidence_images(result, output_dir):
     """
-    Generate table images grouping flagged network requests by tracker category.
-
+    Generate DevTools-style composite images per tracker category.
     Returns a list of generated file paths.
     """
     request_details = result.get("request_details", [])
     flagged_domains = result.get("flagged_domains", {})
+    cookies_after = result.get("cookies_after_details", [])
+    viewport_path = result.get("screenshot_viewport")
 
     if not request_details or not flagged_domains:
         return []
@@ -244,26 +543,14 @@ def generate_network_evidence_images(result, output_dir):
             categories.setdefault(cat, []).append(req)
 
     paths = []
-    for category, requests in sorted(categories.items()):
+    for category, reqs in sorted(categories.items()):
         safe_cat = category.lower().replace(" / ", "_").replace(" ", "_")
-        filename = f"network_{safe_cat}.png"
+        filename = f"evidence_{safe_cat}.png"
         filepath = os.path.join(output_dir, filename)
 
-        headers = ["Request URL", "Domain", "Method", "Type"]
-        rows = []
-        for req in requests[:50]:  # cap at 50 rows per image
-            req_domain = urlparse(req["url"]).netloc
-            rows.append([
-                req["url"],
-                req_domain,
-                req["method"],
-                req["resource_type"],
-            ])
-
-        col_widths = [550, 280, 80, 120]
-        _draw_table_image(
-            f"Network Evidence: {category} ({len(requests)} requests)",
-            headers, rows, filepath, col_widths,
+        _generate_devtools_evidence_image(
+            category, reqs[:50], cookies_after,
+            viewport_path, filepath,
         )
         paths.append(filepath)
 
@@ -272,52 +559,23 @@ def generate_network_evidence_images(result, output_dir):
 
 def generate_cookie_evidence_images(result, output_dir):
     """
-    Generate table images showing tracking cookies grouped by domain.
-
-    Returns a list of generated file paths.
+    Generate a single DevTools-style cookies evidence image.
+    Returns a list with one file path, or empty.
     """
     cookies_after = result.get("cookies_after_details", [])
     if not cookies_after:
         return []
 
-    # Group cookies by domain, only include domains with known tracking cookies.
-    domains = {}
-    for cookie in cookies_after:
-        name = cookie.get("name", "")
-        if name in KNOWN_TRACKING_COOKIES:
-            domain = cookie.get("domain", "unknown")
-            domains.setdefault(domain, []).append(cookie)
+    tracking_cookies = [
+        c for c in cookies_after if c.get("name") in KNOWN_TRACKING_COOKIES
+    ]
+    if not tracking_cookies:
+        return []
 
-    paths = []
-    for domain, cookies in sorted(domains.items()):
-        safe_domain = domain.lstrip(".").replace(".", "_").replace(":", "_")
-        filename = f"cookies_{safe_domain}.png"
-        filepath = os.path.join(output_dir, filename)
-
-        headers = ["Name", "Platform", "Value", "Domain", "HttpOnly", "Secure"]
-        rows = []
-        for c in cookies:
-            platform = KNOWN_TRACKING_COOKIES.get(c["name"], "")
-            value = str(c.get("value", ""))
-            if len(value) > 20:
-                value = value[:17] + "..."
-            rows.append([
-                c["name"],
-                platform,
-                value,
-                c.get("domain", ""),
-                "Yes" if c.get("httpOnly") else "No",
-                "Yes" if c.get("secure") else "No",
-            ])
-
-        col_widths = [180, 160, 200, 250, 80, 80]
-        _draw_table_image(
-            f"Cookie Evidence: {domain}",
-            headers, rows, filepath, col_widths,
-        )
-        paths.append(filepath)
-
-    return paths
+    filepath = os.path.join(output_dir, "cookies_evidence.png")
+    img = _draw_devtools_cookies_panel(tracking_cookies, cookies_after)
+    img.save(filepath)
+    return [filepath]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -765,28 +1023,28 @@ def generate_evidence_package(result):
         # Create folder structure.
         letter_dir = os.path.join(tmpdir, "letter")
         screenshots_dir = os.path.join(tmpdir, "screenshots")
-        network_dir = os.path.join(screenshots_dir, "network")
-        cookies_dir = os.path.join(screenshots_dir, "cookies")
+        evidence_dir = os.path.join(screenshots_dir, "evidence")
         website_dir = os.path.join(screenshots_dir, "website")
         report_dir = os.path.join(tmpdir, "report")
         raw_dir = os.path.join(tmpdir, "raw_data")
 
-        for d in [letter_dir, network_dir, cookies_dir, website_dir,
+        for d in [letter_dir, evidence_dir, website_dir,
                   report_dir, raw_dir]:
             os.makedirs(d, exist_ok=True)
 
         # 1. Demand letter.
         generate_demand_letter(result, os.path.join(letter_dir, "demand_letter.pdf"))
 
-        # 2. Network evidence images.
-        generate_network_evidence_images(result, network_dir)
+        # 2. Network evidence images (DevTools composites).
+        generate_network_evidence_images(result, evidence_dir)
 
-        # 3. Cookie evidence images.
-        generate_cookie_evidence_images(result, cookies_dir)
+        # 3. Cookie evidence image (DevTools style).
+        generate_cookie_evidence_images(result, evidence_dir)
 
         # 4. Website screenshots (copy from scan output).
         for key, label in [("screenshot_before", "before"),
-                           ("screenshot_after", "after")]:
+                           ("screenshot_after", "after"),
+                           ("screenshot_viewport", "viewport")]:
             src = result.get(key)
             if src and os.path.exists(src):
                 domain = urlparse(result["url"]).netloc.replace(":", "_")

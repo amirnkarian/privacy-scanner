@@ -402,6 +402,7 @@ def scan_url(browser, url, status_callback=None):
         "still_tracking": "no",
         "screenshot_before": None,
         "screenshot_after": None,
+        "screenshot_viewport": None,
         "notes": [],
         # Enhanced data capture for evidence package.
         "cookies_before_details": [],
@@ -448,10 +449,21 @@ def scan_url(browser, url, status_callback=None):
 
     def on_request(request):
         captured_requests.append(request.url)
+        try:
+            headers = dict(request.headers) if request.headers else {}
+        except Exception:
+            headers = {}
+        try:
+            post_data_length = len(request.post_data) if request.post_data else 0
+        except Exception:
+            post_data_length = 0
         request_details.append({
             "url": request.url,
             "method": request.method,
             "resource_type": request.resource_type,
+            "post_data_length": post_data_length,
+            "timestamp": time.time(),
+            "headers": headers,
         })
 
     page.on("request", on_request)
@@ -710,10 +722,20 @@ def scan_url(browser, url, status_callback=None):
     except Exception as e:
         print(f"[!] Screenshot failed: {e}")
 
+    # Viewport-only screenshot for DevTools evidence composite.
+    viewport_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_viewport.png")
+    try:
+        page.screenshot(path=viewport_path, full_page=False)
+        results["screenshot_viewport"] = viewport_path
+        print(f"[*] Viewport screenshot saved: {viewport_path}")
+    except Exception as e:
+        print(f"[!] Viewport screenshot failed: {e}")
+
     # ── Step 11: Save to database ───────────────────────────────────
     screenshot_paths = json.dumps({
         "before": results["screenshot_before"],
         "after": results["screenshot_after"],
+        "viewport": results.get("screenshot_viewport"),
     })
 
     row_id = database.save_scan_result(
