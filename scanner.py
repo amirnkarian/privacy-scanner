@@ -580,6 +580,21 @@ def scan_url(browser, url, status_callback=None):
     # just on the homepage.  We navigate to the shop page, click a
     # product, and capture all requests made during that flow.
 
+    # After opt-out, verify we're still on the target domain.
+    # Some consent buttons redirect the browser away.
+    current_url_check = page.url
+    target_base = domain.replace("www.", "")
+    if target_base not in current_url_check:
+        print(f"[!] Opt-out navigated away to {current_url_check} — returning to {url}")
+        results["notes"].append(f"Opt-out redirected to {current_url_check}; returned to target.")
+        try:
+            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
+            page.wait_for_timeout(3000)
+        except PlaywrightTimeout:
+            pass
+        except Exception as e:
+            print(f"[!] Failed to navigate back: {e}")
+
     # Clear old requests so we only capture post-opt-out activity.
     captured_requests.clear()
     request_details.clear()
@@ -685,7 +700,6 @@ def scan_url(browser, url, status_callback=None):
     report_status("Analyzing post-opt-out network traffic...", 13)
 
     if flagged_domains:
-        results["still_tracking"] = "yes"
         print(f"\n[!] FLAGGED TRACKER DOMAINS ({len(flagged_domains)}):")
         for fd, info in sorted(flagged_domains.items()):
             print(f"      - {fd}  ({info['count']} requests)  "
@@ -695,11 +709,11 @@ def scan_url(browser, url, status_callback=None):
         print("[*] No known tracker domains found in post-opt-out requests.")
         report_status("No tracker domains found after opt-out", 14)
 
+    # Only flag as a violation if actual tracker requests were made post-opt-out.
     if results["trackers_after"]:
         results["still_tracking"] = "yes"
 
     if new_tp_cookie_domains:
-        results["still_tracking"] = "yes"
         print(f"\n[!] NEW third-party cookies set after opt-out:")
         for d in new_tp_cookie_domains:
             print(f"      - {d}")
@@ -712,7 +726,23 @@ def scan_url(browser, url, status_callback=None):
     results["flagged_domains"] = flagged_domains
     results["all_request_domains"] = request_domains
 
-    # ── Step 10: Take "after" screenshot ────────────────────────────
+    # ── Step 10: Verify we're still on target domain ────────────────
+    # The browser may have navigated away during opt-out or product
+    # browsing (e.g. redirected to Google or another site).
+    current_url = page.url
+    target_base = domain.replace("www.", "")
+    if target_base not in current_url:
+        print(f"[!] Browser navigated away to {current_url} — returning to {url}")
+        results["notes"].append(f"Browser navigated away to {current_url}; returned to target.")
+        try:
+            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
+            page.wait_for_timeout(3000)
+        except PlaywrightTimeout:
+            pass
+        except Exception as e:
+            print(f"[!] Failed to navigate back: {e}")
+
+    # Take "after" screenshot.
     after_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_after.png")
     try:
         page.screenshot(path=after_path, full_page=True)
