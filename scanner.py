@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -31,10 +32,10 @@ import database
 SCREENSHOTS_DIR = "screenshots"
 
 # How long (ms) to wait for a page to load before giving up.
-PAGE_LOAD_TIMEOUT = 30_000  # 30 seconds per page navigation
+PAGE_LOAD_TIMEOUT = 15_000  # 15 seconds per page navigation
 
 # Maximum time (seconds) for the ENTIRE scan of a single site.
-MAX_SCAN_TIME = 120  # 2 minutes hard cap
+MAX_SCAN_TIME = 90  # 90 seconds hard cap
 
 # How long (seconds) to scroll/monitor after clicking a product.
 POST_PRODUCT_MONITOR = 15
@@ -1553,10 +1554,13 @@ def scan_url(browser, url, status_callback=None):
     class ScanTimeout(Exception):
         """Raised when the global scan time limit is exceeded."""
 
+    # Hard timeout flag — set by the threading.Timer when it fires.
+    _hard_timeout_fired = threading.Event()
+
     def check_timeout(label=""):
-        """Raise ScanTimeout if the 2-minute global limit is exceeded."""
+        """Raise ScanTimeout if the 90-second global limit is exceeded."""
         elapsed = time.time() - scan_start_time
-        if elapsed >= MAX_SCAN_TIME:
+        if _hard_timeout_fired.is_set() or elapsed >= MAX_SCAN_TIME:
             raise ScanTimeout(
                 f"Global scan timeout ({MAX_SCAN_TIME}s) exceeded at: {label} "
                 f"(elapsed: {elapsed:.0f}s)"
@@ -1591,6 +1595,22 @@ def scan_url(browser, url, status_callback=None):
         ),
     )
     page = context.new_page()
+
+    # ── HARD TIMEOUT: threading.Timer force-kills context at 90s ───
+    # This is the nuclear option that guarantees we NEVER get stuck.
+    # When it fires, context.close() causes all in-flight Playwright
+    # operations to raise, which the step-level try/except blocks catch.
+    def _hard_timeout_kill():
+        _hard_timeout_fired.set()
+        print(f"\n[!!!] HARD TIMEOUT ({MAX_SCAN_TIME}s) — force-closing browser context for {url}")
+        try:
+            context.close()
+        except Exception:
+            pass
+
+    _hard_timer = threading.Timer(MAX_SCAN_TIME, _hard_timeout_kill)
+    _hard_timer.daemon = True
+    _hard_timer.start()
 
     # ── Step 2: Start network monitoring ────────────────────────────
     # Every time the browser makes a network request (images, scripts,
@@ -1704,30 +1724,37 @@ def scan_url(browser, url, status_callback=None):
         print("STEP 2: Looking for opt-out mechanism...")
         report_status("STEP 2: Looking for opt-out mechanism...", 6)
 
-        optout_result = attempt_cookie_optout(page, domain, safe_domain=safe_domain)
-        results["opt_out_found"] = optout_result["opt_out_found"]
-        results["opt_out_clicked"] = optout_result["opt_out_clicked"]
-        results["opt_out_verified"] = optout_result["opt_out_verified"]
-        results["opt_out_method"] = optout_result["opt_out_method"]
-        results["opt_out_attempts"] = optout_result["opt_out_attempts"]
+        try:
+            check_timeout("before opt-out attempt")
+            optout_result = attempt_cookie_optout(page, domain, safe_domain=safe_domain)
+            results["opt_out_found"] = optout_result["opt_out_found"]
+            results["opt_out_clicked"] = optout_result["opt_out_clicked"]
+            results["opt_out_verified"] = optout_result["opt_out_verified"]
+            results["opt_out_method"] = optout_result["opt_out_method"]
+            results["opt_out_attempts"] = optout_result["opt_out_attempts"]
 
-        # Store opt-out screenshots
-        optout_screenshots = optout_result.get("screenshots", {})
-        if optout_screenshots:
-            results["screenshot_optout"] = optout_screenshots.get("optout_after") or optout_screenshots.get("optout_final")
-            results["optout_screenshots"] = optout_screenshots
+            # Store opt-out screenshots
+            optout_screenshots = optout_result.get("screenshots", {})
+            if optout_screenshots:
+                results["screenshot_optout"] = optout_screenshots.get("optout_after") or optout_screenshots.get("optout_final")
+                results["optout_screenshots"] = optout_screenshots
 
-        # Log opt-out type for console visibility.
-        for att in optout_result.get("opt_out_attempts", []):
-            if att.get("clicked"):
-                strategy = att.get("strategy", "")
-                if strategy == "banner_popup":
-                    print(f"STEP 2: Detected TYPE A (popup/banner) — {att.get('element', '')}")
-                elif strategy == "footer_link":
-                    print(f"STEP 2: Detected TYPE B (footer link) — {att.get('element', '')}")
-                elif strategy == "js_consent_api":
-                    print(f"STEP 2: Detected TYPE C (JavaScript API) — {att.get('element', '')}")
-                break
+            # Log opt-out type for console visibility.
+            for att in optout_result.get("opt_out_attempts", []):
+                if att.get("clicked"):
+                    strategy = att.get("strategy", "")
+                    if strategy == "banner_popup":
+                        print(f"STEP 2: Detected TYPE A (popup/banner) — {att.get('element', '')}")
+                    elif strategy == "footer_link":
+                        print(f"STEP 2: Detected TYPE B (footer link) — {att.get('element', '')}")
+                    elif strategy == "js_consent_api":
+                        print(f"STEP 2: Detected TYPE C (JavaScript API) — {att.get('element', '')}")
+                    break
+        except ScanTimeout:
+            raise
+        except Exception as e:
+            print(f"[!] STEP 2: Opt-out failed ({e}) — skipping to next step")
+            results["notes"].append(f"Opt-out step failed: {e}")
 
         if results["opt_out_verified"] == "yes":
             report_status(f'Opted out via: {results["opt_out_method"]}', 7)
@@ -1742,144 +1769,153 @@ def scan_url(browser, url, status_callback=None):
 
         # ── Step 7: Post-opt-out — return to homepage ─────────────────
         check_timeout("after opt-out attempt")
+        shop_clicked = None
 
-        if results["opt_out_clicked"] == "yes":
-            print("STEP 3: Returning to homepage after opt-out...")
-            report_status("STEP 3: Returning to homepage...", 8)
-        else:
-            report_status("STEP 3: Preparing post-opt-out monitoring...", 8)
-
-        # 7a. GO BACK to the homepage with a fresh start.
         try:
-            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
-            report_status("Returned to homepage after opt-out", 9)
-            print(f"[*] Returned to homepage: {url}")
-        except PlaywrightTimeout:
-            print("[!] Homepage reload timed out — continuing")
+            if results["opt_out_clicked"] == "yes":
+                print("STEP 3: Returning to homepage after opt-out...")
+                report_status("STEP 3: Returning to homepage...", 8)
+            else:
+                report_status("STEP 3: Preparing post-opt-out monitoring...", 8)
+
+            # 7a. GO BACK to the homepage with a fresh start.
+            try:
+                page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                report_status("Returned to homepage after opt-out", 9)
+                print(f"[*] Returned to homepage: {url}")
+            except PlaywrightTimeout:
+                print("[!] Homepage reload timed out — continuing")
+            except Exception as e:
+                print(f"[!] Failed to return to homepage: {e}")
+
+            # 7b. Brief wait for homepage — no networkidle.
+            page.wait_for_timeout(2000)
+            check_timeout("after homepage return")
+
+            # ── STEP 3: Navigate to shop page ──────────────────────────────
+            print("STEP 3: Looking for shop/category page...")
+            report_status("STEP 3: Looking for shop/category page...", 10)
+            shop_clicked = navigate_to_shop(page)
+
+            if shop_clicked:
+                print(f"STEP 3: Navigated to category page: {page.url}")
+                report_status("STEP 3: Navigated to category page", 11)
+                # Wait 5 seconds for category page to fully load.
+                page.wait_for_timeout(5000)
+                check_timeout("shop page load")
+            else:
+                print("STEP 3: Could not find shop/category page.")
+                report_status("STEP 3: No shop page found — using current page", 11)
+                results["notes"].append("Could not find shop page link; browsing from homepage.")
+        except ScanTimeout:
+            raise
         except Exception as e:
-            print(f"[!] Failed to return to homepage: {e}")
-
-        # 7b. Brief wait for homepage — no networkidle.
-        page.wait_for_timeout(2000)
-        check_timeout("after homepage return")
-
-        # ── STEP 3: Navigate to shop page ──────────────────────────────
-        print("STEP 3: Looking for shop/category page...")
-        report_status("STEP 3: Looking for shop/category page...", 10)
-        shop_clicked = navigate_to_shop(page)
-
-        if shop_clicked:
-            print(f"STEP 3: Navigated to category page: {page.url}")
-            report_status("STEP 3: Navigated to category page", 11)
-            # Wait 5 seconds for category page to fully load.
-            page.wait_for_timeout(5000)
-            check_timeout("shop page load")
-        else:
-            print("STEP 3: Could not find shop/category page.")
-            report_status("STEP 3: No shop page found — using current page", 11)
-            results["notes"].append("Could not find shop page link; browsing from homepage.")
+            print(f"[!] STEP 3: Navigation failed ({e}) — skipping to next step")
+            results["notes"].append(f"Navigation step failed: {e}")
 
         # ── STEP 4: Click a product ────────────────────────────────────
         print("STEP 4: Looking for products...")
         report_status("STEP 4: Looking for products...", 12)
-
-        # Count product links on the page.
-        try:
-            pl = page.locator(
-                'a[href*="/products/"], a[href*="/product/"], '
-                'a[href*="/shop/"], a[href*="/p/"], a[href*="/item/"]'
-            )
-            print(f"STEP 4: Found {pl.count()} product links on page")
-        except Exception:
-            pass
-
-        # Remember the URL before clicking so we can verify navigation.
-        pre_click_url = page.url
-        product_clicked = click_first_product(page)
         on_product_page = False
 
-        if product_clicked:
-            print("STEP 4: Clicked product — waiting 5s for load...")
-            report_status("STEP 4: Clicked product — loading...", 13)
-            page.wait_for_timeout(5000)
-            check_timeout("product page load")
+        try:
+            check_timeout("before product click")
 
-            # Verify the URL changed to a product page.
-            current_url = page.url
-            product_url_patterns = [
-                "/products/", "/product/", "/p/", "/dp/", "/item/",
-                "/collections/", "/shop/", "/catalog/",
-            ]
-            url_changed = current_url != pre_click_url
-            looks_like_product = any(p in current_url for p in product_url_patterns)
+            # Count product links on the page.
+            try:
+                pl = page.locator(
+                    'a[href*="/products/"], a[href*="/product/"], '
+                    'a[href*="/shop/"], a[href*="/p/"], a[href*="/item/"]'
+                )
+                print(f"STEP 4: Found {pl.count()} product links on page")
+            except Exception:
+                pass
 
-            if url_changed and looks_like_product:
-                on_product_page = True
-                print(f"STEP 4: Now on product page: {current_url}")
-            elif url_changed:
-                # URL changed but doesn't match typical product patterns —
-                # still accept it (some sites use unusual URL structures).
-                on_product_page = True
-                print(f"STEP 4: Now on product page: {current_url}")
-            else:
-                # URL didn't change — product click may have failed.
-                # Try clicking a different product.
-                print(f"STEP 4: URL unchanged — trying another product...")
-                results["notes"].append("First product click did not navigate; retrying.")
-                report_status("STEP 4: Retrying with different product...", 13)
+            # Remember the URL before clicking so we can verify navigation.
+            pre_click_url = page.url
+            product_clicked = click_first_product(page)
 
-                # Try clicking the 2nd or 3rd product link.
-                retry_selectors = [
-                    'a[href*="/products/"]:nth-of-type(2)',
-                    'a[href*="/products/"]:nth-of-type(3)',
-                    '.product-card a[href*="/products/"]',
-                    'a[href*="/product/"]',
-                    'a[href*="/collections/"] >> nth=1',
+            if product_clicked:
+                print("STEP 4: Clicked product — waiting 5s for load...")
+                report_status("STEP 4: Clicked product — loading...", 13)
+                page.wait_for_timeout(5000)
+                check_timeout("product page load")
+
+                # Verify the URL changed to a product page.
+                current_url = page.url
+                product_url_patterns = [
+                    "/products/", "/product/", "/p/", "/dp/", "/item/",
+                    "/collections/", "/shop/", "/catalog/",
                 ]
-                for sel in retry_selectors:
+                url_changed = current_url != pre_click_url
+                looks_like_product = any(p in current_url for p in product_url_patterns)
+
+                if url_changed and looks_like_product:
+                    on_product_page = True
+                    print(f"STEP 4: Now on product page: {current_url}")
+                elif url_changed:
+                    on_product_page = True
+                    print(f"STEP 4: Now on product page: {current_url}")
+                else:
+                    print(f"STEP 4: URL unchanged — trying another product...")
+                    results["notes"].append("First product click did not navigate; retrying.")
+                    report_status("STEP 4: Retrying with different product...", 13)
+
+                    retry_selectors = [
+                        'a[href*="/products/"]:nth-of-type(2)',
+                        'a[href*="/products/"]:nth-of-type(3)',
+                        '.product-card a[href*="/products/"]',
+                        'a[href*="/product/"]',
+                        'a[href*="/collections/"] >> nth=1',
+                    ]
+                    for sel in retry_selectors:
+                        try:
+                            loc = page.locator(sel).first
+                            if loc.is_visible(timeout=500):
+                                loc.click(timeout=15000)
+                                page.wait_for_timeout(5000)
+                                if page.url != pre_click_url:
+                                    on_product_page = True
+                                    print(f"STEP 4: Now on product page: {page.url}")
+                                    break
+                        except Exception:
+                            continue
+
+                    if not on_product_page:
+                        print(f"STEP 4: Could not navigate to product page. URL: {page.url}")
+                        results["notes"].append(f"Could not navigate to product page. URL: {page.url}")
+
+            if not product_clicked and not on_product_page:
+                sub_texts = ["New Arrivals", "Jeans", "Dresses", "Tops", "Shoes",
+                             "Bags", "All", "View All", "See All", "Shop All"]
+                for sub in sub_texts:
                     try:
-                        loc = page.locator(sel).first
+                        loc = page.locator(f'a:has-text("{sub}")').first
                         if loc.is_visible(timeout=500):
-                            loc.click(timeout=5000)
-                            page.wait_for_timeout(5000)
-                            if page.url != pre_click_url:
-                                on_product_page = True
-                                print(f"STEP 4: Now on product page: {page.url}")
-                                break
+                            pre = page.url
+                            loc.click(timeout=15000)
+                            page.wait_for_timeout(3000)
+                            if page.url != pre:
+                                print(f"STEP 4: Navigated to subcategory via '{sub}': {page.url}")
+                                product_clicked = click_first_product(page)
+                                if product_clicked:
+                                    page.wait_for_timeout(3000)
+                                    on_product_page = page.url != pre
+                                    print(f"STEP 4: Now on product page: {page.url}")
+                                    break
                     except Exception:
                         continue
 
-                if not on_product_page:
-                    print(f"STEP 4: Could not navigate to product page. URL: {page.url}")
-                    results["notes"].append(f"Could not navigate to product page. URL: {page.url}")
-
-        if not product_clicked and not on_product_page:
-            # Try clicking a sub-category link to reach a product listing.
-            sub_texts = ["New Arrivals", "Jeans", "Dresses", "Tops", "Shoes",
-                         "Bags", "All", "View All", "See All", "Shop All"]
-            for sub in sub_texts:
-                try:
-                    loc = page.locator(f'a:has-text("{sub}")').first
-                    if loc.is_visible(timeout=500):
-                        pre = page.url
-                        loc.click(timeout=5000)
-                        page.wait_for_timeout(3000)
-                        if page.url != pre:
-                            print(f"STEP 4: Navigated to subcategory via '{sub}': {page.url}")
-                            product_clicked = click_first_product(page)
-                            if product_clicked:
-                                page.wait_for_timeout(3000)
-                                on_product_page = page.url != pre
-                                print(f"STEP 4: Now on product page: {page.url}")
-                                break
-                except Exception:
-                    continue
-
-        if not product_clicked and not on_product_page:
-            print("STEP 4: Could not find a product to click.")
-            results["notes"].append(
-                "Could not find a product to click; monitored page with scrolling instead."
-            )
+            if not product_clicked and not on_product_page:
+                print("STEP 4: Could not find a product to click.")
+                results["notes"].append(
+                    "Could not find a product to click; monitored page with scrolling instead."
+                )
+        except ScanTimeout:
+            raise
+        except Exception as e:
+            print(f"[!] STEP 4: Product click failed ({e}) — skipping to next step")
+            results["notes"].append(f"Product click step failed: {e}")
 
         # ── STEP 5: CLEAR ALL network logs ─────────────────────────────
         print("STEP 5: Clearing ALL network logs — fresh start")
@@ -1915,20 +1951,15 @@ def scan_url(browser, url, status_callback=None):
         except Exception as e:
             print(f"STEP 6: Screenshot failed: {e}")
 
-        # ── STEP 7: Monitor network for 15 seconds with scrolling ──────
-        print(f"STEP 7: Monitoring network for {POST_PRODUCT_MONITOR}s (scrolling)...")
-        report_status("STEP 7: Monitoring network for 15s", 15)
+        # ── STEP 7: Monitor network for 15 seconds — simple wait ───────
+        # Just wait. No scrolling, no network idle, no selectors.
+        # The network request handler is still active and captures everything.
+        print(f"STEP 7: Waiting {POST_PRODUCT_MONITOR}s for delayed trackers...")
+        report_status("STEP 7: Waiting 15s for delayed trackers", 15)
         try:
-            page.mouse.move(640, 450)
-            scroll_end = time.time() + POST_PRODUCT_MONITOR
-            while time.time() < scroll_end:
-                page.mouse.wheel(0, 350)
-                page.wait_for_timeout(1500)
-                check_timeout("monitoring scrolling")
-        except ScanTimeout:
-            raise
+            page.wait_for_timeout(POST_PRODUCT_MONITOR * 1000)
         except Exception as e:
-            print(f"STEP 7: Scroll monitoring error: {e}")
+            print(f"STEP 7: Wait interrupted ({e}) — continuing with what we captured")
 
         tiktok_found = len([u for u in captured_requests
                            if any(td in u for td in TIKTOK_TRACKER_DOMAINS)])
@@ -1941,11 +1972,11 @@ def scan_url(browser, url, status_callback=None):
                 f"Monitored for {POST_PRODUCT_MONITOR}s."
             )
 
-    except ScanTimeout as e:
-        # Global 2-minute timeout hit — save whatever we captured.
+    except Exception as e:
+        # Global timeout (soft or hard) or catastrophic error — save whatever we captured.
         timed_out = True
         elapsed = time.time() - scan_start_time
-        print(f"\n[!!!] SCAN TIMEOUT after {elapsed:.0f}s: {e}")
+        print(f"\n[!!!] SCAN TIMEOUT/ERROR after {elapsed:.0f}s: {e}")
         results["notes"].append(f"Scan timed out after {elapsed:.0f}s: {e}")
         report_status(f"Scan timed out after {elapsed:.0f}s — saving partial results", 15)
 
@@ -2116,10 +2147,11 @@ def scan_url(browser, url, status_callback=None):
     results["request_details"] = list(request_details)
 
     # ── Clean up ────────────────────────────────────────────────────
+    _hard_timer.cancel()  # Disarm the hard timeout if scan finished in time.
     try:
         context.close()
     except Exception:
-        pass  # Context may already be closed after timeout
+        pass  # Context may already be closed after hard timeout
 
     # ── Print summary ─────────────────────────────────────────────
     print_summary(results)
