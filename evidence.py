@@ -659,8 +659,8 @@ def generate_demand_letter(result, output_path):
     # ── Re: line ──────────────────────────────────────────────────
     pdf.set_font("Helvetica", "B", 10)
     pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
-        f"Re: {domain}'s Violations of California Privacy Laws "
-        "- Pre-Litigation Demand")
+        f"Re: {domain}'s Deployment of TikTok Tracking in Violation of "
+        "California Privacy Laws - Pre-Litigation Demand")
     pdf.ln(4)
 
     # ── Body ──────────────────────────────────────────────────────
@@ -671,13 +671,14 @@ def generate_demand_letter(result, output_path):
     pdf.ln(3)
 
     pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
-        "This firm represents [CLIENT NAME] regarding your company's violations of "
-        "California privacy laws in connection with the operation of your website, "
-        f"{domain}. The purpose of this letter is to put you on notice of these "
-        "violations and to demand that you take immediate corrective action.")
+        "This firm represents [CLIENT NAME] regarding your company's deployment of "
+        "TikTok tracking technologies on your website, "
+        f"{domain}, in violation of California privacy laws. The purpose of this "
+        "letter is to put you on notice of these violations and to demand that you "
+        "take immediate corrective action.")
     pdf.ln(3)
 
-    # ── Facts ─────────────────────────────────────────────────────
+    # ── Facts (TikTok-focused) ───────────────────────────────────
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "FACTUAL BACKGROUND", ln=True)
     pdf.ln(2)
@@ -688,6 +689,10 @@ def generate_demand_letter(result, output_path):
         result.get("opt_out_method", "the opt-out/reject button")
     )
 
+    # Identify TikTok-specific trackers found.
+    tiktok_trackers = result.get("tiktok_trackers_after", [])
+    tiktok_domains_str = ", ".join(tiktok_trackers) if tiktok_trackers else "analytics.tiktok.com"
+
     if opt_out_verified:
         pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
             f"On {date_str}, our client visited {domain}. Upon arrival, the website "
@@ -695,40 +700,96 @@ def generate_demand_letter(result, output_path):
             f"of tracking via {opt_out_method} on the cookie consent "
             "banner. The opt-out was verified -- the consent banner was confirmed dismissed. "
             "Despite this clear expression of refusal to consent to tracking, "
-            "the website continued to deploy tracking technologies.")
+            "the website continued to transmit user data to TikTok's analytics servers.")
     else:
         pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
             f"On {date_str}, our client visited {domain}. Upon arrival, the website "
             "presented a cookie consent mechanism. Our client attempted to opt out "
             "of tracking by interacting with the cookie consent banner. "
-            "However, the opt-out could not be fully verified as the consent banner "
-            "may not have been properly dismissed. Regardless, tracking technologies "
-            "continued to be deployed during the browsing session.")
+            "Regardless of the opt-out attempt, the website continued to transmit "
+            "user data to TikTok's analytics servers during the browsing session.")
+    pdf.ln(3)
+
+    # TikTok-specific factual detail.
+    pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
+        f"Specifically, after opting out, {domain} continued sending network requests "
+        f"to the following TikTok tracking domains: {tiktok_domains_str}. "
+        "TikTok's analytics software, commonly deployed as the 'TikTok Pixel,' "
+        "collects the following data from each visitor:")
+    pdf.ln(2)
+
+    tiktok_data_points = [
+        "Device information (type, model, operating system, screen resolution)",
+        "Browser fingerprint data (user agent, language, installed plugins)",
+        "Geographic location data (derived from IP address)",
+        "Full URLs of pages visited on the site",
+        "Referral source and search terms used to reach the site",
+        "User interaction events (clicks, scrolling, time on page)",
+        "Cross-site tracking identifiers via TikTok cookies (_ttp, _tt_enable_cookie)",
+    ]
+    pdf.set_font("Helvetica", "", 10)
+    for point in tiktok_data_points:
+        pdf.cell(0, 5, _sanitize_for_pdf(f"  - {point}"), ln=True)
     pdf.ln(3)
 
     pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
-        "Specifically, after opting out, the following tracking platforms continued "
-        "to receive data from your website during normal browsing activity:")
-    pdf.ln(2)
+        "This data is transmitted to TikTok the moment a user visits the site, "
+        "even before any consent is given or any interaction occurs. After our client "
+        "explicitly opted out, the site continued transmitting this data to TikTok "
+        "during subsequent browsing activity, including navigating to product pages "
+        "and scrolling through content.")
+    pdf.ln(3)
 
-    # List tracker platforms.
-    for category, domains_list in sorted(tracker_groups.items()):
-        domain_str = ", ".join(sorted(domains_list))
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text= f"- {category}")
-        pdf.set_font("Helvetica", "", 9)
-        pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text= f"    Domains: {domain_str}")
+    # NSA / national security context.
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "NATIONAL SECURITY CONCERNS", ln=True)
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "", 10)
+
+    pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
+        "The deployment of TikTok tracking on your website raises significant national "
+        "security concerns. The National Security Agency (NSA) has publicly described "
+        'TikTok as "a platform for surveillance" used for information operations. '
+        "TikTok's parent company, ByteDance, is a Chinese corporation subject to "
+        "China's National Intelligence Law (2017), which compels Chinese companies to "
+        '"support, assist, and cooperate with national intelligence work" and to '
+        "provide access to data upon government request.")
+    pdf.ln(3)
+
+    pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
+        "By deploying TikTok's analytics pixel on your website, your company is "
+        "facilitating the transmission of your customers' browsing data, device "
+        "fingerprints, and behavioral patterns to a foreign adversary's data collection "
+        "infrastructure. This occurs without meaningful user consent and in direct "
+        "contradiction of your users' express opt-out choices.")
+    pdf.ln(3)
+
+    # List other trackers for context (informational).
+    other_tracker_groups = {cat: doms for cat, doms in tracker_groups.items()
+                           if cat.lower() != "tiktok"}
+    if other_tracker_groups:
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.set_text_color(120, 120, 120)
+        pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
+            "Note: The following additional tracking platforms were also detected "
+            "after opt-out (documented for completeness):")
         pdf.ln(1)
-    pdf.ln(2)
+        for category, domains_list in sorted(other_tracker_groups.items()):
+            domain_str = ", ".join(sorted(domains_list))
+            pdf.cell(0, 5, _sanitize_for_pdf(f"  - {category}: {domain_str}"), ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(3)
 
-    # List tracking cookies if found.
-    if tracking_cookies:
+    # List TikTok tracking cookies if found.
+    tiktok_cookies = [(n, p) for n, p in tracking_cookies
+                      if "tiktok" in p.lower()]
+    if tiktok_cookies:
         pdf.set_font("Helvetica", "", 10)
         pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
-            "Additionally, the following tracking cookies were identified "
+            "Additionally, the following TikTok tracking cookies were identified "
             "in the browser after the opt-out:")
         pdf.ln(2)
-        unique_cookies = sorted(set(tracking_cookies))
+        unique_cookies = sorted(set(tiktok_cookies))
         for name, platform in unique_cookies:
             pdf.cell(0, 5, f"  - {name} ({platform})", ln=True)
         pdf.ln(3)
@@ -763,25 +824,39 @@ def generate_demand_letter(result, output_path):
     pdf.set_font("Helvetica", "", 10)
 
     violations = [
-        ("California Invasion of Privacy Act (CIPA), Penal Code Sections 631 and 635",
-         "Your website's continued deployment of tracking technologies after our "
-         "client's opt-out constitutes unauthorized interception and recording of "
-         "electronic communications. Each individual tracking request constitutes "
-         "a separate violation."),
+        ("California Invasion of Privacy Act (CIPA) - Trap and Trace Device, "
+         "Penal Code Sections 631(a) and 638.51",
+         "TikTok's analytics software deployed on your website functions as a "
+         "trap and trace device under California Penal Code Section 638.51. "
+         "It intercepts and records electronic communications including browsing "
+         "behavior, device fingerprint data, geographic location, page URLs visited, "
+         "referral sources, and user interaction events. Deploying such a device "
+         "without explicit user consent violates CIPA Section 631(a). Your website's "
+         "continued transmission of user data to TikTok after our client's explicit "
+         "opt-out constitutes a per-visit violation. Each individual tracking request "
+         f"to {tiktok_domains_str} constitutes a separate violation."),
         ("California Consumer Privacy Act (CCPA/CPRA), Civil Code Section 1798.100 et seq.",
          "Your failure to honor our client's opt-out request violates the CCPA's "
          "requirement to respect consumer choices regarding the sale and sharing of "
-         "personal information. Under the CPRA amendments, consumers have the right "
-         "to opt out of cross-context behavioral advertising."),
+         "personal information. Transmitting user data to TikTok -- a foreign-owned "
+         "advertising platform -- after opt-out constitutes unauthorized sharing of "
+         "personal information for cross-context behavioral advertising in violation "
+         "of the CPRA amendments."),
         ("Unfair Competition Law (UCL), Business & Professions Code Section 17200",
-         "The above-described conduct constitutes unlawful, unfair, and/or "
-         "fraudulent business practices."),
+         "Deploying TikTok's surveillance infrastructure on a consumer-facing website "
+         "while presenting a cookie opt-out mechanism that fails to actually stop "
+         "TikTok tracking constitutes unlawful, unfair, and/or fraudulent business "
+         "practices."),
         ("False Advertising Law (FAL), Business & Professions Code Section 17500",
          "Representing to consumers that they can opt out of tracking while "
-         "continuing to track constitutes false and misleading advertising."),
+         "continuing to transmit their data to TikTok constitutes false and "
+         "misleading advertising."),
         ("Common Law Invasion of Privacy",
-         "The continued tracking of our client's browsing activity after an "
-         "explicit opt-out constitutes an intrusion upon seclusion."),
+         "The continued transmission of our client's browsing activity, device "
+         "fingerprint, and behavioral data to TikTok's servers after an explicit "
+         "opt-out constitutes an intrusion upon seclusion that would be highly "
+         "offensive to a reasonable person, particularly given TikTok's documented "
+         "national security risks."),
     ]
 
     for title, description in violations:
@@ -802,10 +877,14 @@ def generate_demand_letter(result, output_path):
     pdf.ln(2)
 
     demands = [
-        "Immediately cease all tracking of users who have opted out of tracking "
-        "via your cookie consent mechanism;",
+        "Immediately remove all TikTok tracking pixels, analytics scripts, and "
+        f"related technologies from {domain};",
+        "Cease all transmission of user data to TikTok domains (analytics.tiktok.com, "
+        "business-api.tiktok.com, and any related endpoints) for users who have "
+        "opted out of tracking;",
         "Conduct a comprehensive audit of all tracking technologies deployed on "
-        f"{domain} to ensure compliance with users' opt-out choices;",
+        f"{domain}, with particular attention to TikTok integrations and their "
+        "compliance with users' opt-out choices;",
         "Provide written confirmation within [14/30] days of receipt of this "
         "letter that the above corrective actions have been taken;",
         "Discuss pre-litigation resolution of our client's claims, including "
@@ -879,16 +958,19 @@ def generate_scan_report(result, output_path):
         pdf.set_fill_color(255, 71, 87)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 12, "  VIOLATION: Tracking continues after user opt-out", ln=True, fill=True)
+        pdf.cell(0, 12, "  VIOLATION: TikTok tracking continues after user opt-out", ln=True, fill=True)
         pdf.set_text_color(0, 0, 0)
         pdf.ln(4)
         pdf.set_font("Helvetica", "", 11)
         opt_method = _sanitize_for_pdf(result.get("opt_out_method", "the cookie consent mechanism"))
+        tiktok_after = result.get("tiktok_trackers_after", [])
+        tiktok_str = ", ".join(tiktok_after) if tiktok_after else "TikTok domains"
         pdf.multi_cell(0, 6, new_x="LMARGIN", new_y="NEXT", text=
-            f"The scan detected {len(flagged)} tracker domain(s) that continued "
+            f"The scan detected TikTok tracking ({tiktok_str}) that continued "
             f"sending data after the user opted out of tracking via {opt_method}. "
-            f"This may constitute violations of CIPA, CCPA/CPRA, "
-            f"and other California privacy laws.")
+            "TikTok's analytics software functions as a trap-and-trace device under "
+            "CIPA Section 638.51. This constitutes violations of CIPA, CCPA/CPRA, "
+            "and other California privacy laws.")
     elif result.get("still_tracking") == "inconclusive":
         pdf.set_fill_color(255, 165, 2)
         pdf.set_text_color(255, 255, 255)
@@ -906,13 +988,13 @@ def generate_scan_report(result, output_path):
         pdf.set_fill_color(46, 213, 115)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 12, "  CLEAN: Tracking stopped after user opt-out", ln=True, fill=True)
+        pdf.cell(0, 12, "  CLEAN: No TikTok tracking after user opt-out", ln=True, fill=True)
         pdf.set_text_color(0, 0, 0)
         pdf.ln(4)
         pdf.set_font("Helvetica", "", 11)
         pdf.multi_cell(0, 6, new_x="LMARGIN", new_y="NEXT", text=
-            "No known tracker domains were detected after the user opted out. "
-            "The website appears to respect the user's opt-out choice.")
+            "No TikTok tracker domains were detected after the user opted out. "
+            "The website does not appear to transmit data to TikTok after opt-out.")
     pdf.ln(6)
 
     # ── Scan Details ──────────────────────────────────────────────
@@ -1106,6 +1188,7 @@ def generate_evidence_log(result, output_path):
         "flagged_tracker_domains": result.get("flagged_domains", {}),
         "trackers_before": result.get("trackers_before", []),
         "trackers_after": result.get("trackers_after", []),
+        "tiktok_trackers_after": result.get("tiktok_trackers_after", []),
         "all_request_domains": result.get("all_request_domains", {}),
         "notes": result.get("notes", []),
         "ca_registration": result.get("ca_registration"),

@@ -47,6 +47,25 @@ POST_OPTOUT_MONITOR = 15
 # and session-recording services.
 # ────────────────────────────────────────────────────────────────────
 
+# ────────────────────────────────────────────────────────────────────
+# TIKTOK-SPECIFIC TRACKER DOMAINS
+#
+# Only TikTok tracking determines FAIL/PASS.  All other trackers are
+# still detected and logged for evidence, but do not trigger violations.
+# ────────────────────────────────────────────────────────────────────
+
+TIKTOK_TRACKER_DOMAINS = [
+    "analytics.tiktok.com",
+    "business-api.tiktok.com",
+]
+
+TIKTOK_TRACKER_URL_PATTERNS = [
+    "tiktok.com/analytics",
+    "www.tiktok.com/api",
+]
+
+TIKTOK_COOKIES = ["_ttp", "_tt_enable_cookie"]
+
 TRACKER_DOMAINS = [
     # Google
     "google-analytics.com",
@@ -247,6 +266,27 @@ def collect_tracker_hits(captured_requests):
     found = set()
     for url in captured_requests:
         match = is_tracker_request(url)
+        if match:
+            found.add(match)
+    return sorted(found)
+
+
+def is_tiktok_request(request_url):
+    """Check if a network request URL matches a known TikTok tracker."""
+    for domain in TIKTOK_TRACKER_DOMAINS:
+        if domain in request_url:
+            return domain
+    for pattern in TIKTOK_TRACKER_URL_PATTERNS:
+        if pattern in request_url:
+            return pattern
+    return None
+
+
+def collect_tiktok_hits(captured_requests):
+    """Return sorted list of unique TikTok tracker domains contacted."""
+    found = set()
+    for url in captured_requests:
+        match = is_tiktok_request(url)
         if match:
             found.add(match)
     return sorted(found)
@@ -1416,6 +1456,7 @@ def scan_url(browser, url, status_callback=None):
         "opt_out_clicked": "no",
         "trackers_before": [],
         "trackers_after": [],
+        "tiktok_trackers_after": [],
         "still_tracking": "no",
         "screenshot_before": None,
         "screenshot_after": None,
@@ -1704,6 +1745,7 @@ def scan_url(browser, url, status_callback=None):
     # ── Step 9: Check for continued tracking ────────────────────────
     # Now look at everything the browser sent during the shopping flow.
     results["trackers_after"] = collect_tracker_hits(captured_requests)
+    results["tiktok_trackers_after"] = collect_tiktok_hits(captured_requests)
 
     # Group ALL post-opt-out requests by domain for the detailed report.
     request_domains = group_requests_by_domain(captured_requests)
@@ -1749,15 +1791,14 @@ def scan_url(browser, url, status_callback=None):
         print("[*] No known tracker domains found in post-opt-out requests.")
         report_status("No tracker domains found after opt-out", 16)
 
-    # Determine verdict:
-    #   - Trackers found after opt-out  → FAIL ("yes")  regardless of verification
-    #   - No trackers after opt-out     → PASS ("no")
-    #   - Couldn't find/click opt-out   → INCONCLUSIVE
+    # Determine verdict — ONLY TikTok tracking triggers FAIL:
+    #   - TikTok trackers found after opt-out  → FAIL ("yes")
+    #   - No TikTok trackers after opt-out     → PASS ("no")
+    #   - Couldn't find/click opt-out          → INCONCLUSIVE
     #
-    # INCONCLUSIVE is reserved for when the scanner couldn't complete the
-    # opt-out process at all (no banner found, nothing clicked).  If the
-    # opt-out was attempted and trackers fire afterward, that's a FAIL.
-    if results["trackers_after"]:
+    # All other trackers (Google, Facebook, etc.) are still logged for
+    # evidence but do NOT affect the pass/fail determination.
+    if results["tiktok_trackers_after"]:
         results["still_tracking"] = "yes"
     elif results["opt_out_clicked"] != "yes":
         results["still_tracking"] = "inconclusive"
@@ -1767,8 +1808,8 @@ def scan_url(browser, url, status_callback=None):
         tracker_cookie_domains = [
             d for d in new_tp_cookie_domains if is_tracker_request(d.lstrip("."))
         ]
+        # Log all new tracker cookies for evidence.
         if tracker_cookie_domains:
-            results["still_tracking"] = "yes"
             print(f"\n[!] NEW tracker cookies set after opt-out:")
             for d in tracker_cookie_domains:
                 print(f"      - {d}")
@@ -1776,6 +1817,13 @@ def scan_url(browser, url, status_callback=None):
                 f"New tracker cookies after opt-out: "
                 f"{json.dumps(tracker_cookie_domains)}"
             )
+            # Only upgrade to FAIL if TikTok cookies are among them.
+            tiktok_cookie_domains = [
+                d for d in tracker_cookie_domains
+                if any(tk in d for tk in ["tiktok", "bytedance"])
+            ]
+            if tiktok_cookie_domains:
+                results["still_tracking"] = "yes"
 
         # Log all new third-party cookies (even non-tracker ones) as notes.
         non_tracker = [d for d in new_tp_cookie_domains if d not in tracker_cookie_domains]
@@ -1881,6 +1929,8 @@ def print_summary(results):
           f"{results['trackers_before']}")
     print(f"  Trackers after       : {len(results['trackers_after'])} "
           f"{results['trackers_after']}")
+    print(f"  TikTok after         : {len(results['tiktok_trackers_after'])} "
+          f"{results['tiktok_trackers_after']}")
 
     # Show every flagged domain with request counts.
     flagged = results.get("flagged_domains", {})
@@ -1891,11 +1941,11 @@ def print_summary(results):
                   f"[{info['matched_rule']}]")
 
     if results["still_tracking"] == "yes":
-        print(f"\n  *** STILL TRACKING AFTER OPT-OUT ***")
+        print(f"\n  *** TIKTOK TRACKING CONTINUES AFTER OPT-OUT ***")
     elif results["still_tracking"] == "inconclusive":
         print(f"\n  *** INCONCLUSIVE — Opt-out could not be verified ***")
     else:
-        print(f"\n  Tracking stopped after opt-out: OK")
+        print(f"\n  No TikTok tracking after opt-out: OK")
 
     if results["notes"]:
         print(f"  Notes: {'; '.join(results['notes'])}")
@@ -2001,6 +2051,7 @@ def main():
                     "url": url,
                     "error": str(e),
                     "still_tracking": "unknown",
+                    "tiktok_trackers_after": [],
                 })
                 # Save the error to the database too.
                 database.save_scan_result(

@@ -274,7 +274,7 @@ def _generate_pdf_report(result):
         pdf.set_fill_color(255, 71, 87)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 12, "  VIOLATION: Still tracking after opt-out", ln=True, fill=True)
+        pdf.cell(0, 12, "  VIOLATION: TikTok tracking continues after opt-out", ln=True, fill=True)
     elif result["still_tracking"] == "inconclusive":
         pdf.set_fill_color(255, 165, 2)
         pdf.set_text_color(255, 255, 255)
@@ -284,7 +284,7 @@ def _generate_pdf_report(result):
         pdf.set_fill_color(46, 213, 115)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 12, "  CLEAN: Tracking stopped after opt-out", ln=True, fill=True)
+        pdf.cell(0, 12, "  CLEAN: No TikTok tracking after opt-out", ln=True, fill=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(8)
 
@@ -313,7 +313,11 @@ def _generate_pdf_report(result):
     pdf.cell(0, 7, f"Opt-out banner found: {result['opt_out_found']}", ln=True)
     pdf.cell(0, 7, f"Opt-out clicked: {result['opt_out_clicked']}", ln=True)
     pdf.cell(0, 7, f"Trackers before opt-out: {len(result['trackers_before'])}", ln=True)
-    pdf.cell(0, 7, f"Trackers after opt-out: {len(result['trackers_after'])}", ln=True)
+    tiktok_after = result.get("tiktok_trackers_after", [])
+    all_after = result.get("trackers_after", [])
+    other_after = [t for t in all_after if t not in tiktok_after]
+    pdf.cell(0, 7, f"TikTok trackers after opt-out: {len(tiktok_after)}", ln=True)
+    pdf.cell(0, 7, f"Other trackers after opt-out: {len(other_after)}", ln=True)
     pdf.ln(5)
 
     # ── Trackers before (list) ─────────────────────────────────
@@ -328,28 +332,56 @@ def _generate_pdf_report(result):
     # ── Flagged domains table ──────────────────────────────────
     flagged = result.get("flagged_domains", {})
     if flagged:
-        pdf.set_font("Helvetica", "B", 14)
-        pdf.cell(0, 10, "Flagged Tracker Domains (Post-Opt-Out)", ln=True)
-        pdf.ln(2)
+        # Split into TikTok and other trackers
+        tiktok_flagged = {d: i for d, i in flagged.items()
+                         if "tiktok" in d.lower() or "tiktok" in i.get("matched_rule", "").lower()}
+        other_flagged = {d: i for d, i in flagged.items() if d not in tiktok_flagged}
 
-        # Table header
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.set_fill_color(34, 38, 57)
-        pdf.set_text_color(255, 255, 255)
-        pdf.cell(85, 8, "  Domain", border=1, fill=True)
-        pdf.cell(25, 8, "Requests", border=1, fill=True, align="C")
-        pdf.cell(70, 8, "  Matched Rule", border=1, fill=True)
-        pdf.ln()
-        pdf.set_text_color(0, 0, 0)
-
-        # Table rows
-        pdf.set_font("Helvetica", "", 9)
-        for fdomain, info in sorted(flagged.items()):
-            pdf.cell(85, 7, f"  {fdomain[:42]}", border=1)
-            pdf.cell(25, 7, str(info["count"]), border=1, align="C")
-            pdf.cell(70, 7, f"  {info['matched_rule'][:34]}", border=1)
+        # TikTok section (primary — red highlight)
+        if tiktok_flagged:
+            pdf.set_font("Helvetica", "B", 14)
+            pdf.cell(0, 10, "TikTok Trackers (Post-Opt-Out) — VIOLATION", ln=True)
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(255, 71, 87)
+            pdf.set_text_color(255, 255, 255)
+            pdf.cell(85, 8, "  Domain", border=1, fill=True)
+            pdf.cell(25, 8, "Requests", border=1, fill=True, align="C")
+            pdf.cell(70, 8, "  Matched Rule", border=1, fill=True)
             pdf.ln()
-        pdf.ln(5)
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Helvetica", "", 9)
+            for fdomain, info in sorted(tiktok_flagged.items()):
+                pdf.set_fill_color(255, 240, 240)
+                pdf.cell(85, 7, f"  {fdomain[:42]}", border=1, fill=True)
+                pdf.cell(25, 7, str(info["count"]), border=1, align="C", fill=True)
+                pdf.cell(70, 7, f"  {info['matched_rule'][:34]}", border=1, fill=True)
+                pdf.ln()
+            pdf.ln(5)
+
+        # Other trackers (informational — gray)
+        if other_flagged:
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_text_color(120, 120, 120)
+            pdf.cell(0, 10, "Other Trackers Detected (Informational)", ln=True)
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(100, 100, 110)
+            pdf.set_text_color(255, 255, 255)
+            pdf.cell(85, 8, "  Domain", border=1, fill=True)
+            pdf.cell(25, 8, "Requests", border=1, fill=True, align="C")
+            pdf.cell(70, 8, "  Matched Rule", border=1, fill=True)
+            pdf.ln()
+            pdf.set_text_color(120, 120, 120)
+            pdf.set_font("Helvetica", "", 9)
+            for fdomain, info in sorted(other_flagged.items()):
+                pdf.cell(85, 7, f"  {fdomain[:42]}", border=1)
+                pdf.cell(25, 7, str(info["count"]), border=1, align="C")
+                pdf.cell(70, 7, f"  {info['matched_rule'][:34]}", border=1)
+                pdf.ln()
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(5)
 
     # ── Notes ──────────────────────────────────────────────────
     notes = result.get("notes", [])
