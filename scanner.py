@@ -1693,74 +1693,140 @@ def scan_url(browser, url, status_callback=None):
             report_status("No shop page found — trying products on current page", 11)
             results["notes"].append("Could not find shop page link; browsing from homepage.")
 
-        # ── Step 9: CLEAR ALL network logs ────────────────────────────
-        # THIS IS CRITICAL: We only care about requests made AFTER the
-        # product click.  Everything before (homepage, shop page load,
-        # opt-out flow) is irrelevant noise.
-        print("[*] Clearing ALL network logs before product click...")
-        report_status("Clearing network logs — fresh start for monitoring", 12)
-        captured_requests.clear()
-        request_details.clear()
-
-        # ── Step 10: Click product and monitor for 15 seconds ─────────
+        # ── Step 9: Click a product and verify we landed on a product page
         print("[*] Looking for a product to click...")
-        report_status("Looking for first product...", 13)
+        report_status("Looking for first product...", 12)
+
+        # Remember the URL before clicking so we can verify navigation.
+        pre_click_url = page.url
         product_clicked = click_first_product(page)
+        on_product_page = False
 
         if product_clicked:
-            print("[*] Clicked on a product — waiting for page load...")
-            report_status("Clicked product — loading product page...", 14)
-            # Wait for product page to load.
-            page.wait_for_timeout(3000)
+            print("[*] Clicked on a product — waiting 5s for page load...")
+            report_status("Clicked product — waiting for product page...", 13)
+            page.wait_for_timeout(5000)
             check_timeout("product page load")
 
-            # Capture product page URL and screenshot for evidence.
-            results["product_page_url"] = page.url
-            product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
-            try:
-                page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
-                results["screenshot_product"] = product_ss_path
-                print(f"[*] Product page screenshot saved: {product_ss_path}")
-            except Exception as e:
-                print(f"[!] Product screenshot failed: {e}")
+            # Verify the URL changed to a product page.
+            current_url = page.url
+            product_url_patterns = [
+                "/products/", "/product/", "/p/", "/dp/", "/item/",
+                "/collections/", "/shop/", "/catalog/",
+            ]
+            url_changed = current_url != pre_click_url
+            looks_like_product = any(p in current_url for p in product_url_patterns)
 
-            # Scroll the product page for exactly 15 seconds.
-            report_status("Monitoring network for 15s — scrolling product page...", 15)
-            print(f"[*] Scrolling product page for {POST_PRODUCT_MONITOR}s...")
-            try:
-                page.mouse.move(640, 450)
-                scroll_end = time.time() + POST_PRODUCT_MONITOR
-                while time.time() < scroll_end:
-                    page.mouse.wheel(0, 350)
-                    page.wait_for_timeout(1500)
-                    check_timeout("post-product scrolling")
-            except ScanTimeout:
-                raise
-            except Exception as e:
-                print(f"[!] Scroll monitoring error: {e}")
+            if url_changed and looks_like_product:
+                on_product_page = True
+                print(f"[*] Confirmed on product page: {current_url}")
+            elif url_changed:
+                # URL changed but doesn't match typical product patterns —
+                # still accept it (some sites use unusual URL structures).
+                on_product_page = True
+                print(f"[*] URL changed (non-standard pattern): {current_url}")
+            else:
+                # URL didn't change — product click may have failed.
+                # Try clicking a different product.
+                print(f"[!] URL unchanged after click ({current_url}) — trying another product...")
+                results["notes"].append("First product click did not navigate; retrying.")
+                report_status("First click failed — trying another product...", 13)
 
-            results["notes"].append(
-                f"Browsed to shop page ({shop_clicked or 'homepage'}) and "
-                f"clicked a product. Monitored for {POST_PRODUCT_MONITOR}s."
-            )
-        else:
+                # Try clicking the 2nd or 3rd product link.
+                retry_selectors = [
+                    'a[href*="/products/"]:nth-of-type(2)',
+                    'a[href*="/products/"]:nth-of-type(3)',
+                    '.product-card a[href*="/products/"]',
+                    'a[href*="/product/"]',
+                    'a[href*="/collections/"] >> nth=1',
+                ]
+                for sel in retry_selectors:
+                    try:
+                        loc = page.locator(sel).first
+                        if loc.is_visible(timeout=500):
+                            loc.click(timeout=5000)
+                            page.wait_for_timeout(5000)
+                            if page.url != pre_click_url:
+                                on_product_page = True
+                                print(f"[*] Retry succeeded — now on: {page.url}")
+                                break
+                    except Exception:
+                        continue
+
+                if not on_product_page:
+                    print(f"[!] Could not navigate to a product page. Current URL: {page.url}")
+                    results["notes"].append(f"Could not navigate to product page. URL: {page.url}")
+
+        if not product_clicked and not on_product_page:
             print("[!] Could not find a product to click.")
             results["notes"].append(
                 "Could not find a product to click; monitored page with scrolling instead."
             )
-            report_status("No product found — scrolling current page...", 14)
-            report_status("Monitoring network for 15s — scrolling page...", 15)
-            try:
-                page.mouse.move(640, 450)
-                scroll_end = time.time() + POST_PRODUCT_MONITOR
-                while time.time() < scroll_end:
-                    page.mouse.wheel(0, 350)
-                    page.wait_for_timeout(1500)
-                    check_timeout("fallback scrolling")
-            except ScanTimeout:
-                raise
-            except Exception:
-                pass
+
+        # ── Step 10: CLEAR network logs, then monitor for 15 seconds ──
+        # CRITICAL: Clear logs NOW, right before monitoring starts.
+        # We only care about requests made during the browsing session.
+        print("[*] Clearing ALL network logs — starting fresh monitoring...")
+        report_status("Clearing network logs — starting 15s monitoring", 14)
+        captured_requests.clear()
+        request_details.clear()
+
+        # Scroll and monitor for exactly 15 seconds.
+        report_status("Monitoring network for 15s — scrolling page...", 15)
+        print(f"[*] Monitoring network for {POST_PRODUCT_MONITOR}s (scrolling)...")
+        try:
+            page.mouse.move(640, 450)
+            scroll_end = time.time() + POST_PRODUCT_MONITOR
+            while time.time() < scroll_end:
+                page.mouse.wheel(0, 350)
+                page.wait_for_timeout(1500)
+                check_timeout("monitoring scrolling")
+        except ScanTimeout:
+            raise
+        except Exception as e:
+            print(f"[!] Scroll monitoring error: {e}")
+
+        # ── Step 11: Take product page screenshot AFTER monitoring ─────
+        # The screenshot MUST be taken while still on the product page,
+        # AFTER the 15-second monitoring period.
+        current_url = page.url
+        print(f"[*] Taking evidence screenshot. Current URL: {current_url}")
+        results["product_page_url"] = current_url
+
+        # Scroll back to top so the screenshot shows the product hero.
+        try:
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+        # Verify we are NOT on the homepage before taking the screenshot.
+        target_base = domain.replace("www.", "")
+        is_homepage = (
+            current_url.rstrip("/") == url.rstrip("/")
+            or current_url.rstrip("/") == f"https://{target_base}"
+            or current_url.rstrip("/") == f"https://www.{target_base}"
+        )
+        if is_homepage:
+            print(f"[!] WARNING: Still on homepage ({current_url}). Screenshot may not show a product.")
+            results["notes"].append(f"WARNING: Evidence screenshot taken on homepage, not product page.")
+        else:
+            print(f"[*] Confirmed NOT on homepage — taking product evidence screenshot")
+
+        product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
+        try:
+            page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
+            results["screenshot_product"] = product_ss_path
+            print(f"[*] Product page screenshot saved: {product_ss_path}")
+            print(f"[*] Screenshot URL: {current_url}")
+        except Exception as e:
+            print(f"[!] Product screenshot failed: {e}")
+
+        if on_product_page:
+            results["notes"].append(
+                f"Product page: {current_url}. "
+                f"Monitored for {POST_PRODUCT_MONITOR}s."
+            )
 
     except ScanTimeout as e:
         # Global 2-minute timeout hit — save whatever we captured.

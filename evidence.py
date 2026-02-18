@@ -496,14 +496,16 @@ def _draw_devtools_cookies_panel(tracking_cookies, cookies_after):
 
 def _generate_devtools_evidence_image(category_name, requests, cookies_after,
                                        viewport_screenshot_path, output_path,
-                                       total_requests=0):
+                                       total_requests=0, product_url=None):
     """
     Generate a side-by-side composite: product page (left 50%) + DevTools Network panel (right 50%).
-    Width is at least 1920px.
+    Width is at least 1920px.  A Chrome-style URL bar is drawn at the top of the left panel.
     """
+    fonts = _load_fonts()
     COMPOSITE_WIDTH = 1920
     LEFT_WIDTH = COMPOSITE_WIDTH // 2   # 960
     RIGHT_WIDTH = COMPOSITE_WIDTH - LEFT_WIDTH  # 960
+    URL_BAR_HEIGHT = 38  # Chrome-style address bar
 
     # Load and resize the page screenshot for the left half.
     if viewport_screenshot_path and os.path.exists(viewport_screenshot_path):
@@ -515,7 +517,9 @@ def _generate_devtools_evidence_image(category_name, requests, cookies_after,
         new_height = 900
         page_img = Image.new("RGB", (LEFT_WIDTH, new_height), (50, 50, 50))
 
-    panel_height = max(new_height, 600)
+    # Total left panel height = URL bar + screenshot.
+    left_total = URL_BAR_HEIGHT + new_height
+    panel_height = max(left_total, 600)
 
     # Draw the DevTools panel for the right half.
     devtools_img = _draw_devtools_network_panel(
@@ -526,10 +530,34 @@ def _generate_devtools_evidence_image(category_name, requests, cookies_after,
 
     # Create composite.
     composite = Image.new("RGB", (COMPOSITE_WIDTH, panel_height), DT_BG)
-    composite.paste(page_img, (0, 0))
+
+    # ── Draw Chrome-style URL bar at top of left panel ────────────
+    cdraw = ImageDraw.Draw(composite)
+    # Tab bar background (dark).
+    cdraw.rectangle([0, 0, LEFT_WIDTH, URL_BAR_HEIGHT], fill=(32, 33, 36))
+    # Address bar (rounded rectangle, lighter).
+    bar_x, bar_y = 8, 7
+    bar_w, bar_h = LEFT_WIDTH - 16, 24
+    cdraw.rounded_rectangle(
+        [bar_x, bar_y, bar_x + bar_w, bar_y + bar_h],
+        radius=12, fill=(48, 49, 52),
+    )
+    # Lock icon (simple).
+    lx = bar_x + 10
+    cdraw.text((lx, bar_y + 5), "\u25cb", fill=(138, 180, 248), font=fonts["12"])
+    # URL text.
+    display_url = product_url or ""
+    if len(display_url) > 90:
+        display_url = display_url[:87] + "..."
+    cdraw.text((lx + 16, bar_y + 5), display_url, fill=(202, 202, 208), font=fonts["12"])
+    # Bottom border.
+    cdraw.line([(0, URL_BAR_HEIGHT - 1), (LEFT_WIDTH, URL_BAR_HEIGHT - 1)],
+               fill=(60, 60, 60), width=1)
+
+    # Paste the page screenshot below the URL bar.
+    composite.paste(page_img, (0, URL_BAR_HEIGHT))
 
     # Vertical divider.
-    cdraw = ImageDraw.Draw(composite)
     cdraw.line([(LEFT_WIDTH, 0), (LEFT_WIDTH, panel_height)], fill=DT_BORDER, width=2)
 
     composite.paste(devtools_img, (LEFT_WIDTH + 2, 0))
@@ -569,6 +597,7 @@ def generate_network_evidence_images(result, output_dir):
             category, reqs[:50], cookies_after,
             screenshot_path, filepath,
             total_requests=total_requests,
+            product_url=result.get("product_page_url"),
         )
         paths.append(filepath)
 
@@ -639,6 +668,7 @@ def generate_tiktok_evidence_images(result, output_dir):
             "tiktok", tiktok_requests[:50], cookies_after,
             screenshot_path, network_path,
             total_requests=total_requests,
+            product_url=result.get("product_page_url"),
         )
         paths.append(network_path)
 
