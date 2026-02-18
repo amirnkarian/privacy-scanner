@@ -31,13 +31,13 @@ import database
 SCREENSHOTS_DIR = "screenshots"
 
 # How long (ms) to wait for a page to load before giving up.
-PAGE_LOAD_TIMEOUT = 60_000  # 60 seconds
+PAGE_LOAD_TIMEOUT = 30_000  # 30 seconds per page navigation
 
-# How long (seconds) to wait after clicking opt-out for the site to adjust.
-POST_OPTOUT_WAIT = 30
+# Maximum time (seconds) for the ENTIRE scan of a single site.
+MAX_SCAN_TIME = 120  # 2 minutes hard cap
 
-# How long (seconds) to monitor network traffic after the opt-out wait.
-POST_OPTOUT_MONITOR = 15
+# How long (seconds) to scroll/monitor after clicking a product.
+POST_PRODUCT_MONITOR = 15
 
 # ────────────────────────────────────────────────────────────────────
 # KNOWN TRACKER DOMAINS
@@ -811,12 +811,8 @@ def _try_footer_optout(page, original_url):
 
                 if navigated_away:
                     print(f"[*] Navigated to privacy center: {url_after}")
-                    # Wait for the page to load
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                    except PlaywrightTimeout:
-                        pass
-                    page.wait_for_timeout(2000)
+                    # Wait for the page to load (fixed timeout, no networkidle)
+                    page.wait_for_timeout(3000)
 
                     # On the privacy center page, look for a "Manage Cookie Preferences" link
                     manage_texts = [
@@ -845,7 +841,7 @@ def _try_footer_optout(page, original_url):
                 # If nothing worked, try going back if we navigated
                 if navigated_away:
                     try:
-                        page.goto(original_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
+                        page.goto(original_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
                         page.wait_for_timeout(2000)
                     except Exception:
                         pass
@@ -1474,15 +1470,30 @@ def scan_url(browser, url, status_callback=None):
         "opt_out_attempts": [],
     }
 
+    scan_start_time = time.time()
+
+    class ScanTimeout(Exception):
+        """Raised when the global scan time limit is exceeded."""
+
+    def check_timeout(label=""):
+        """Raise ScanTimeout if the 2-minute global limit is exceeded."""
+        elapsed = time.time() - scan_start_time
+        if elapsed >= MAX_SCAN_TIME:
+            raise ScanTimeout(
+                f"Global scan timeout ({MAX_SCAN_TIME}s) exceeded at: {label} "
+                f"(elapsed: {elapsed:.0f}s)"
+            )
+
     def report_status(message, step):
         """Send a status update via the callback, if one was provided."""
+        elapsed = time.time() - scan_start_time
         results["scan_timeline"].append({
             "step": step,
             "message": message,
             "timestamp": datetime.now().isoformat(),
         })
         if status_callback:
-            status_callback(message, step, TOTAL_STEPS)
+            status_callback(message, step, TOTAL_STEPS, elapsed)
 
     domain = get_domain(url)
     print(f"\n{'=' * 60}")
@@ -1547,22 +1558,27 @@ def scan_url(browser, url, status_callback=None):
     report_status("Visiting website...", 2)
 
     # ── Step 3: Navigate to the website ─────────────────────────────
-    try:
-        page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
+    timed_out = False
+    all_cookies = []
+    tp_cookies_before = []
+    try:  # Global ScanTimeout wrapper — catches 2-minute limit
+      try:
+        page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
         print(f"[*] Page loaded: {url}")
         report_status("Page loaded successfully", 3)
-    except PlaywrightTimeout:
+      except PlaywrightTimeout:
         print(f"[!] Page load timed out after {PAGE_LOAD_TIMEOUT // 1000}s — "
               "continuing with what we have.")
         results["notes"].append("Page load timed out.")
-    except Exception as e:
+      except Exception as e:
         print(f"[!] Error loading page: {e}")
         results["notes"].append(f"Page load error: {e}")
         context.close()
         return results
 
     # Give any lazy-loaded scripts a moment to fire.
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(2000)
+    check_timeout("after page load")
 
     # ── Step 4: Take "before" screenshot ────────────────────────────
     os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
@@ -1575,6 +1591,8 @@ def scan_url(browser, url, status_callback=None):
         report_status("Before screenshot captured", 4)
     except Exception as e:
         print(f"[!] Screenshot failed: {e}")
+
+    check_timeout("before opt-out")
 
     # ── Step 5: Record initial trackers ─────────────────────────────
     # Check every request we captured against our tracker list.
@@ -1637,6 +1655,8 @@ def scan_url(browser, url, status_callback=None):
     # navigation (page transitions, product clicks, scrolling), not
     # when sitting idle on one page.
 
+    check_timeout("after opt-out attempt")
+
     if results["opt_out_clicked"] == "yes":
         print(f"[*] Opt-out complete. Clearing network logs and returning to homepage...")
         report_status("Clearing network logs after opt-out...", 8)
@@ -1659,8 +1679,9 @@ def scan_url(browser, url, status_callback=None):
     except Exception as e:
         print(f"[!] Failed to return to homepage: {e}")
 
-    # 7c. WAIT for homepage to fully load.
-    page.wait_for_timeout(3000)
+    # 7c. Brief wait for homepage — no networkidle.
+    page.wait_for_timeout(2000)
+    check_timeout("after homepage return")
 
     # 7d. CLEAR network logs again — we only want to capture activity
     #     from the shop browsing flow onward.
@@ -1681,12 +1702,9 @@ def scan_url(browser, url, status_callback=None):
     if shop_clicked:
         print(f'[*] Navigated to shop page via: "{shop_clicked}"')
         report_status(f"Navigated to shop page", 11)
-        # WAIT for the shop page to fully load.
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except PlaywrightTimeout:
-            pass  # some shop pages never fully idle
-        page.wait_for_timeout(5000)
+        # Fixed wait — never use networkidle (some sites never stop).
+        page.wait_for_timeout(3000)
+        check_timeout("shop page load")
     else:
         print("[!] Could not find a Shop / All Products link.")
         report_status("No shop page found — trying products on current page", 11)
@@ -1700,48 +1718,60 @@ def scan_url(browser, url, status_callback=None):
     if product_clicked:
         print("[*] Clicked on a product — monitoring network requests...")
         report_status("Clicked product — monitoring network requests...", 13)
-        # Wait for the product page to fully load.
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except PlaywrightTimeout:
-            pass
+        # Fixed wait — never use networkidle.
         page.wait_for_timeout(3000)
+        check_timeout("product page load")
 
-        # 8c. Scroll down the product page slowly over ~20 seconds
-        #     to trigger scroll-based and lazy-loaded trackers.
-        report_status("Scrolling product page — monitoring for delayed trackers...", 14)
-        print("[*] Scrolling product page for 20s to trigger delayed trackers...")
+        # 8c. Scroll down the product page for exactly 15 seconds
+        #     using a simple sleep timer — no networkidle waits.
+        report_status("Scrolling product page — monitoring for 15s...", 14)
+        print(f"[*] Scrolling product page for {POST_PRODUCT_MONITOR}s...")
         try:
             page.mouse.move(640, 450)
-            # 10 scroll increments over ~20 seconds.
-            for i in range(10):
+            scroll_end = time.time() + POST_PRODUCT_MONITOR
+            while time.time() < scroll_end:
                 page.mouse.wheel(0, 350)
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1500)
+                check_timeout("post-product scrolling")
+        except ScanTimeout:
+            raise
         except Exception as e:
             print(f"[!] Scroll monitoring error: {e}")
 
         results["notes"].append(
             f"Browsed to shop page ({shop_clicked or 'homepage'}) and "
-            "clicked a product. Scrolled for 20s."
+            f"clicked a product. Scrolled for {POST_PRODUCT_MONITOR}s."
         )
     else:
         print("[!] Could not find a product to click.")
         results["notes"].append(
             "Could not find a product to click; monitored page with scrolling instead."
         )
-        # Fall back: scroll and interact with the current page for ~20s.
+        # Fall back: scroll the current page for 15 seconds.
         report_status("No product found — scrolling current page...", 13)
-        report_status("Scrolling page — monitoring for delayed trackers...", 14)
+        report_status("Scrolling page — monitoring for 15s...", 14)
         try:
             page.mouse.move(640, 450)
-            for i in range(10):
+            scroll_end = time.time() + POST_PRODUCT_MONITOR
+            while time.time() < scroll_end:
                 page.mouse.wheel(0, 350)
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1500)
+                check_timeout("fallback scrolling")
+        except ScanTimeout:
+            raise
         except Exception:
             pass
 
+    except ScanTimeout as e:
+        # Global 2-minute timeout hit — save whatever we captured.
+        timed_out = True
+        elapsed = time.time() - scan_start_time
+        print(f"\n[!!!] SCAN TIMEOUT after {elapsed:.0f}s: {e}")
+        results["notes"].append(f"Scan timed out after {elapsed:.0f}s: {e}")
+        report_status(f"Scan timed out after {elapsed:.0f}s — saving partial results", 15)
+
     # ── Step 9: Check for continued tracking ────────────────────────
-    # Now look at everything the browser sent during the shopping flow.
+    # Process whatever network requests were captured (even if timed out).
     results["trackers_after"] = collect_tracker_hits(captured_requests)
     results["tiktok_trackers_after"] = collect_tiktok_hits(captured_requests)
 
@@ -1756,22 +1786,27 @@ def scan_url(browser, url, status_callback=None):
             flagged_domains[req_domain] = {"count": count, "matched_rule": match}
 
     # Re-check cookies — were new third-party cookies set after opt-out?
-    all_cookies_after = context.cookies()
-    results["cookies_after_details"] = all_cookies_after
-    tp_cookies_after = find_third_party_cookies(all_cookies_after, domain)
+    # If timed out, the browser context may already be unusable.
+    new_tp_cookie_domains = []
+    try:
+        all_cookies_after = context.cookies()
+        results["cookies_after_details"] = all_cookies_after
+        tp_cookies_after = find_third_party_cookies(all_cookies_after, domain)
 
-    # Compute new cookies set AFTER opt-out (full objects, not just domains).
-    before_keys = {(c["name"], c["domain"]) for c in all_cookies}
-    results["new_cookies_details"] = [
-        c for c in all_cookies_after
-        if (c["name"], c["domain"]) not in before_keys
-    ]
+        # Compute new cookies set AFTER opt-out (full objects, not just domains).
+        before_keys = {(c["name"], c["domain"]) for c in all_cookies}
+        results["new_cookies_details"] = [
+            c for c in all_cookies_after
+            if (c["name"], c["domain"]) not in before_keys
+        ]
 
-    # New third-party cookies set AFTER the opt-out.
-    new_tp_cookie_domains = sorted(
-        {c["domain"] for c in tp_cookies_after}
-        - {c["domain"] for c in tp_cookies_before}
-    )
+        # New third-party cookies set AFTER the opt-out.
+        new_tp_cookie_domains = sorted(
+            {c["domain"] for c in tp_cookies_after}
+            - {c["domain"] for c in tp_cookies_before}
+        )
+    except Exception as e:
+        print(f"[!] Could not re-check cookies (context may be closed): {e}")
 
     # ── Print detailed network report ──────────────────────────────
     print(f"\n[*] === POST-OPT-OUT NETWORK REPORT ===")
@@ -1791,13 +1826,16 @@ def scan_url(browser, url, status_callback=None):
 
     # Determine verdict — ONLY TikTok tracking triggers FAIL:
     #   - TikTok trackers found after opt-out  → FAIL ("yes")
-    #   - No TikTok trackers after opt-out     → PASS ("no")
+    #   - Scan timed out, no TikTok found yet  → TIMEOUT
     #   - Couldn't find/click opt-out          → INCONCLUSIVE
+    #   - No TikTok trackers after opt-out     → PASS ("no")
     #
     # All other trackers (Google, Facebook, etc.) are still logged for
     # evidence but do NOT affect the pass/fail determination.
     if results["tiktok_trackers_after"]:
         results["still_tracking"] = "yes"
+    elif timed_out:
+        results["still_tracking"] = "timeout"
     elif results["opt_out_clicked"] != "yes":
         results["still_tracking"] = "inconclusive"
 
@@ -1838,25 +1876,26 @@ def scan_url(browser, url, status_callback=None):
     results["all_request_domains"] = request_domains
 
     # ── Step 10: Verify we're still on target domain ────────────────
-    # The browser may have navigated away during opt-out or product
-    # browsing (e.g. redirected to Google or another site).
-    current_url = page.url
-    target_base = domain.replace("www.", "")
-    if target_base not in current_url:
-        print(f"[!] Browser navigated away to {current_url} — returning to {url}")
-        results["notes"].append(f"Browser navigated away to {current_url}; returned to target.")
+    # Skip domain verification and screenshots if timed out — page may be stuck.
+    if not timed_out:
         try:
-            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
-            page.wait_for_timeout(3000)
-        except PlaywrightTimeout:
-            pass
+            current_url = page.url
+            target_base = domain.replace("www.", "")
+            if target_base not in current_url:
+                print(f"[!] Browser navigated away to {current_url} — returning to {url}")
+                results["notes"].append(f"Browser navigated away to {current_url}; returned to target.")
+                try:
+                    page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                    page.wait_for_timeout(3000)
+                except PlaywrightTimeout:
+                    pass
         except Exception as e:
-            print(f"[!] Failed to navigate back: {e}")
+            print(f"[!] Domain verification failed: {e}")
 
-    # Take "after" screenshot.
+    # Take "after" screenshot (attempt even after timeout — may capture partial state).
     after_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_after.png")
     try:
-        page.screenshot(path=after_path, full_page=True)
+        page.screenshot(path=after_path, full_page=True, timeout=5000)
         results["screenshot_after"] = after_path
         print(f"[*] 'After' screenshot saved: {after_path}")
         report_status("After screenshot captured", 17)
@@ -1866,7 +1905,7 @@ def scan_url(browser, url, status_callback=None):
     # Viewport-only screenshot for DevTools evidence composite.
     viewport_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_viewport.png")
     try:
-        page.screenshot(path=viewport_path, full_page=False)
+        page.screenshot(path=viewport_path, full_page=False, timeout=5000)
         results["screenshot_viewport"] = viewport_path
         print(f"[*] Viewport screenshot saved: {viewport_path}")
     except Exception as e:
@@ -1897,7 +1936,10 @@ def scan_url(browser, url, status_callback=None):
     results["request_details"] = list(request_details)
 
     # ── Clean up ────────────────────────────────────────────────────
-    context.close()
+    try:
+        context.close()
+    except Exception:
+        pass  # Context may already be closed after timeout
 
     # ── Print summary ─────────────────────────────────────────────
     print_summary(results)
@@ -1930,6 +1972,8 @@ def print_summary(results):
 
     if results["still_tracking"] == "yes":
         print(f"\n  *** TIKTOK TRACKING CONTINUES AFTER OPT-OUT ***")
+    elif results["still_tracking"] == "timeout":
+        print(f"\n  *** TIMEOUT — Scan exceeded time limit ***")
     elif results["still_tracking"] == "inconclusive":
         print(f"\n  *** INCONCLUSIVE — Opt-out could not be verified ***")
     else:

@@ -371,6 +371,11 @@ header .subtitle {
     color: var(--warning);
     border: 1px solid rgba(255, 165, 2, 0.25);
 }
+.badge-timeout {
+    background: rgba(255, 200, 0, 0.12);
+    color: #ffc800;
+    border: 1px solid rgba(255, 200, 0, 0.25);
+}
 
 .batch-table .domain-cell {
     font-family: var(--mono);
@@ -997,7 +1002,8 @@ function connectSSE(scanId) {
 
     eventSource.addEventListener('status', (e) => {
         const data = JSON.parse(e.data);
-        statusText.textContent = data.message;
+        const elapsed = data.elapsed ? ' (' + Math.round(data.elapsed) + 's)' : '';
+        statusText.textContent = data.message + elapsed;
         if (data.step && data.total_steps) {
             const pct = Math.round((data.step / data.total_steps) * 100);
             progressFill.style.width = pct + '%';
@@ -1098,7 +1104,8 @@ function connectBatchSSE(batchId) {
         const domain = data.current_url.replace(/^https?:\/\//, '').replace(/\/$/, '');
         document.getElementById('batch-progress-header').textContent =
             'Scanning ' + idx + ' of ' + data.total + ' \u2014 ' + domain;
-        document.getElementById('batch-status-text').textContent = data.message;
+        const elapsed = data.elapsed ? ' (' + Math.round(data.elapsed) + 's)' : '';
+        document.getElementById('batch-status-text').textContent = data.message + elapsed;
 
         // Overall progress: combine domain progress with batch progress
         const domainPct = (data.step && data.total_steps) ? (data.step / data.total_steps) : 0;
@@ -1114,8 +1121,8 @@ function connectBatchSSE(batchId) {
         if (result.still_tracking === 'yes') {
             batchViolations++;
             playChaChing();
-        } else if (result.still_tracking === 'inconclusive' || result.still_tracking === 'error') {
-            // count inconclusive and errors separately — don't increment clean or violations
+        } else if (result.still_tracking === 'inconclusive' || result.still_tracking === 'error' || result.still_tracking === 'timeout') {
+            // count inconclusive, errors, and timeouts separately — don't increment clean or violations
         } else {
             batchClean++;
         }
@@ -1208,6 +1215,10 @@ function addBatchResultRow(url, scanId, result) {
         categories = cats.length > 0 ? cats.join(', ') : '--';
         actions = '<button class="action-link action-link-evidence" onclick="downloadWithRetry(\'/api/scan/' + scanId + '/evidence\', this)">Evidence</button>' +
                   '<button class="action-link action-link-pdf" onclick="downloadWithRetry(\'/api/scan/' + scanId + '/pdf\', this)">PDF</button>';
+    } else if (result.still_tracking === 'timeout') {
+        statusBadge = '<span class="badge badge-timeout">TIMEOUT</span>';
+        categories = 'Scan timed out';
+        actions = '';
     } else if (result.still_tracking === 'inconclusive') {
         statusBadge = '<span class="badge badge-inconclusive">INCONCLUSIVE</span>';
         const cats = getCategoriesForResult(result);
@@ -1223,7 +1234,7 @@ function addBatchResultRow(url, scanId, result) {
     let tiktokCount = result.tiktok_trackers_after ? result.tiktok_trackers_after.length : 0;
     let allCount = result.trackers_after ? result.trackers_after.length : 0;
     let otherCount = allCount - tiktokCount;
-    if (result.still_tracking === 'error') {
+    if (result.still_tracking === 'error' || result.still_tracking === 'timeout') {
         trackerCount = '--';
     } else {
         trackerCount = '<span style="font-weight:700">' + tiktokCount + '</span>';
@@ -1239,8 +1250,8 @@ function addBatchResultRow(url, scanId, result) {
         '<td class="categories-cell">' + categories + '</td>' +
         '<td><div class="actions-cell">' + actions + '</div></td>';
 
-    // Sort: FAIL first, then INCONCLUSIVE, then ERROR, then PASS
-    const sortOrder = { 'yes': '0', 'inconclusive': '1', 'error': '2' };
+    // Sort: FAIL first, then INCONCLUSIVE, then TIMEOUT, then ERROR, then PASS
+    const sortOrder = { 'yes': '0', 'inconclusive': '1', 'timeout': '2', 'error': '3' };
     row.dataset.status = sortOrder[result.still_tracking] || '3';
 
     // Insert in sorted position
@@ -1344,6 +1355,9 @@ function displayResults(result) {
         banner.className = 'verdict-banner violation';
         banner.innerHTML = '<span class="icon">&#9888;</span> TIKTOK TRACKING VIOLATION DETECTED';
         playChaChing();
+    } else if (result.still_tracking === 'timeout') {
+        banner.className = 'verdict-banner inconclusive';
+        banner.innerHTML = '<span class="icon">&#9888;</span> TIMEOUT — Scan exceeded time limit';
     } else if (result.still_tracking === 'inconclusive') {
         banner.className = 'verdict-banner inconclusive';
         banner.innerHTML = '<span class="icon">&#9888;</span> INCONCLUSIVE — Opt-out could not be verified';

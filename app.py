@@ -114,13 +114,14 @@ def start_scan():
         try:
             database.init_db()
 
-            def status_callback(message, step, total_steps):
+            def status_callback(message, step, total_steps, elapsed=0):
                 q.put({
                     "event": "status",
                     "data": {
                         "message": message,
                         "step": step,
                         "total_steps": total_steps,
+                        "elapsed": round(elapsed, 1),
                     },
                 })
 
@@ -508,7 +509,7 @@ def start_batch_scan():
                     # Create a scan_id so evidence/PDF routes work
                     scan_id = str(uuid.uuid4())
 
-                    def status_callback(message, step, total_steps, _url=url, _i=i):
+                    def status_callback(message, step, total_steps, elapsed=0, _url=url, _i=i):
                         q.put({
                             "event": "batch_status",
                             "data": {
@@ -518,6 +519,7 @@ def start_batch_scan():
                                 "message": message,
                                 "step": step,
                                 "total_steps": total_steps,
+                                "elapsed": round(elapsed, 1),
                             },
                         })
 
@@ -538,8 +540,11 @@ def start_batch_scan():
                         # Pre-generate evidence package in background.
                         _pregenerate_evidence(scan_id, result)
 
-                        if result.get("still_tracking") == "yes":
+                        st = result.get("still_tracking")
+                        if st == "yes":
                             violations += 1
+                        elif st in ("timeout", "inconclusive"):
+                            pass  # Don't count as clean or violation
                         else:
                             clean += 1
 
