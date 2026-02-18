@@ -230,7 +230,8 @@ def _truncate(text, max_chars):
 
 
 def _draw_devtools_network_panel(tracker_name, requests, cookies_after,
-                                  panel_width, panel_height):
+                                  panel_width, panel_height,
+                                  total_requests=0):
     """
     Draw a fake Chrome DevTools Network tab panel.
     Returns a PIL Image.
@@ -361,8 +362,11 @@ def _draw_devtools_network_panel(tracker_name, requests, cookies_after,
     status_y = panel_height - status_bar_h
     draw.rectangle([0, status_y, panel_width, panel_height], fill=DT_STATUS_BAR_BG)
     draw.line([0, status_y, panel_width, status_y], fill=DT_BORDER, width=1)
-    draw.text((8, status_y + 5),
-              f"{len(requests)} requests",
+    if total_requests > 0:
+        status_text = f"{len(requests)} / {total_requests} requests"
+    else:
+        status_text = f"{len(requests)} requests"
+    draw.text((8, status_y + 5), status_text,
               fill=DT_TEXT_DIM, font=fonts["11"])
 
     return img
@@ -491,15 +495,17 @@ def _draw_devtools_cookies_panel(tracking_cookies, cookies_after):
 
 
 def _generate_devtools_evidence_image(category_name, requests, cookies_after,
-                                       viewport_screenshot_path, output_path):
+                                       viewport_screenshot_path, output_path,
+                                       total_requests=0):
     """
-    Generate a side-by-side composite: product page + DevTools Network panel.
+    Generate a side-by-side composite: product page (left 50%) + DevTools Network panel (right 50%).
+    Width is at least 1920px.
     """
-    COMPOSITE_WIDTH = 1400
-    LEFT_WIDTH = 770
-    RIGHT_WIDTH = COMPOSITE_WIDTH - LEFT_WIDTH  # 630
+    COMPOSITE_WIDTH = 1920
+    LEFT_WIDTH = COMPOSITE_WIDTH // 2   # 960
+    RIGHT_WIDTH = COMPOSITE_WIDTH - LEFT_WIDTH  # 960
 
-    # Load and resize the viewport screenshot.
+    # Load and resize the page screenshot for the left half.
     if viewport_screenshot_path and os.path.exists(viewport_screenshot_path):
         page_img = Image.open(viewport_screenshot_path)
         scale = LEFT_WIDTH / page_img.width
@@ -511,10 +517,11 @@ def _generate_devtools_evidence_image(category_name, requests, cookies_after,
 
     panel_height = max(new_height, 600)
 
-    # Draw the DevTools panel.
+    # Draw the DevTools panel for the right half.
     devtools_img = _draw_devtools_network_panel(
         category_name, requests, cookies_after,
         RIGHT_WIDTH, panel_height,
+        total_requests=total_requests,
     )
 
     # Create composite.
@@ -537,7 +544,9 @@ def generate_network_evidence_images(result, output_dir):
     request_details = result.get("request_details", [])
     flagged_domains = result.get("flagged_domains", {})
     cookies_after = result.get("cookies_after_details", [])
-    viewport_path = result.get("screenshot_viewport")
+    # Prefer product page screenshot; fall back to viewport.
+    screenshot_path = result.get("screenshot_product") or result.get("screenshot_viewport")
+    total_requests = result.get("total_requests_captured", 0)
 
     if not request_details or not flagged_domains:
         return []
@@ -558,7 +567,8 @@ def generate_network_evidence_images(result, output_dir):
 
         _generate_devtools_evidence_image(
             category, reqs[:50], cookies_after,
-            viewport_path, filepath,
+            screenshot_path, filepath,
+            total_requests=total_requests,
         )
         paths.append(filepath)
 
@@ -584,6 +594,69 @@ def generate_cookie_evidence_images(result, output_dir):
     img = _draw_devtools_cookies_panel(tracking_cookies, cookies_after)
     img.save(filepath)
     return [filepath]
+
+
+def generate_tiktok_evidence_images(result, output_dir):
+    """
+    Generate TikTok-specific evidence images:
+      1. evidence_tiktok_network_[domain].png — side-by-side product page + DevTools Network
+      2. evidence_tiktok_cookies_[domain].png — DevTools cookies for TikTok
+      3. evidence_product_page_[domain].png  — standalone product page screenshot
+
+    Returns a list of generated file paths.
+    """
+    domain = urlparse(result["url"]).netloc.replace(":", "_")
+    request_details = result.get("request_details", [])
+    cookies_after = result.get("cookies_after_details", [])
+    screenshot_path = result.get("screenshot_product") or result.get("screenshot_viewport")
+    total_requests = result.get("total_requests_captured", 0)
+    paths = []
+
+    # TikTok domains to filter for.
+    tiktok_domains = [
+        "analytics.tiktok.com", "analytics-ipv6.tiktokw.us",
+        "business-api.tiktok.com", "www.tiktok.com",
+    ]
+
+    # 1. Product page screenshot (standalone copy).
+    if screenshot_path and os.path.exists(screenshot_path):
+        product_path = os.path.join(output_dir, f"evidence_product_page_{domain}.png")
+        with open(screenshot_path, "rb") as f_in:
+            with open(product_path, "wb") as f_out:
+                f_out.write(f_in.read())
+        paths.append(product_path)
+
+    # 2. TikTok network evidence (side-by-side composite).
+    tiktok_requests = []
+    for req in request_details:
+        req_domain = urlparse(req["url"]).netloc
+        if any(td in req_domain for td in tiktok_domains):
+            tiktok_requests.append(req)
+
+    if tiktok_requests:
+        network_path = os.path.join(output_dir, f"evidence_tiktok_network_{domain}.png")
+        _generate_devtools_evidence_image(
+            "tiktok", tiktok_requests[:50], cookies_after,
+            screenshot_path, network_path,
+            total_requests=total_requests,
+        )
+        paths.append(network_path)
+
+    # 3. TikTok cookie evidence.
+    tiktok_cookie_names = {"_ttp", "_tt_enable_cookie", "tt_csrf_token",
+                           "tt_chain_token", "ttwid", "msToken"}
+    tiktok_cookies = [
+        c for c in cookies_after
+        if c.get("name") in tiktok_cookie_names
+        or any(td in c.get("domain", "") for td in ["tiktok", "bytedance"])
+    ]
+    if tiktok_cookies:
+        cookie_path = os.path.join(output_dir, f"evidence_tiktok_cookies_{domain}.png")
+        img = _draw_devtools_cookies_panel(tiktok_cookies, cookies_after)
+        img.save(cookie_path)
+        paths.append(cookie_path)
+
+    return paths
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1162,16 +1235,20 @@ def generate_evidence_package(result):
         # 1. Demand letter.
         generate_demand_letter(result, os.path.join(letter_dir, "demand_letter.pdf"))
 
-        # 2. Network evidence images (DevTools composites).
+        # 2. TikTok-specific evidence images (product page + network + cookies).
+        generate_tiktok_evidence_images(result, evidence_dir)
+
+        # 3. Network evidence images per category (DevTools composites).
         generate_network_evidence_images(result, evidence_dir)
 
-        # 3. Cookie evidence image (DevTools style).
+        # 4. Cookie evidence image (all tracking cookies).
         generate_cookie_evidence_images(result, evidence_dir)
 
         # 4. Website screenshots (copy from scan output).
         for key, label in [("screenshot_before", "before"),
                            ("screenshot_after", "after"),
-                           ("screenshot_viewport", "viewport")]:
+                           ("screenshot_viewport", "viewport"),
+                           ("screenshot_product", "product")]:
             src = result.get(key)
             if src and os.path.exists(src):
                 domain = urlparse(result["url"]).netloc.replace(":", "_")

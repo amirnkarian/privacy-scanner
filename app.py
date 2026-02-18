@@ -382,7 +382,8 @@ def _generate_pdf_report(result):
 
     # ── Screenshots ────────────────────────────────────────────
     for label, key in [("Before Opt-Out", "screenshot_before"),
-                       ("After Opt-Out", "screenshot_after")]:
+                       ("After Opt-Out", "screenshot_after"),
+                       ("Product Page", "screenshot_product")]:
         path = result.get(key)
         if path and os.path.exists(path):
             pdf.add_page()
@@ -394,6 +395,27 @@ def _generate_pdf_report(result):
             except Exception:
                 pdf.set_font("Helvetica", "", 11)
                 pdf.cell(0, 10, "(Screenshot could not be embedded)", ln=True)
+
+    # ── TikTok Network Evidence (composite) ────────────────────
+    domain_safe = scanner.get_domain(result["url"]).replace(":", "_")
+    evidence_img = os.path.join("screenshots", f"evidence_tiktok_network_{domain_safe}.png")
+    if not os.path.exists(evidence_img):
+        # Try generating it on the fly.
+        try:
+            from evidence import generate_tiktok_evidence_images
+            generate_tiktok_evidence_images(result, "screenshots")
+        except Exception:
+            pass
+    if os.path.exists(evidence_img):
+        pdf.add_page("L")  # Landscape for wide image
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 10, "TikTok Network Evidence (DevTools Capture)", ln=True)
+        pdf.ln(3)
+        try:
+            pdf.image(evidence_img, x=5, w=287)  # Full landscape width
+        except Exception:
+            pdf.set_font("Helvetica", "", 11)
+            pdf.cell(0, 10, "(Evidence image could not be embedded)", ln=True)
 
     return bytes(pdf.output())
 
@@ -502,7 +524,7 @@ def start_batch_scan():
                             "total": len(urls),
                             "message": f"Starting scan of {url}",
                             "step": 0,
-                            "total_steps": 19,
+                            "total_steps": 20,
                         },
                     })
 

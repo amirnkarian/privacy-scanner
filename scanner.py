@@ -56,6 +56,7 @@ POST_PRODUCT_MONITOR = 15
 
 TIKTOK_TRACKER_DOMAINS = [
     "analytics.tiktok.com",
+    "analytics-ipv6.tiktokw.us",
     "business-api.tiktok.com",
 ]
 
@@ -1443,7 +1444,7 @@ def scan_url(browser, url, status_callback=None):
     Returns:
         A dict summarising the scan results.
     """
-    TOTAL_STEPS = 19
+    TOTAL_STEPS = 20
 
     # We'll collect results as we go and return them at the end.
     results = {
@@ -1457,6 +1458,9 @@ def scan_url(browser, url, status_callback=None):
         "screenshot_before": None,
         "screenshot_after": None,
         "screenshot_viewport": None,
+        "screenshot_product": None,
+        "product_page_url": None,
+        "total_requests_captured": 0,
         "notes": [],
         # Enhanced data capture for evidence package.
         "cookies_before_details": [],
@@ -1650,21 +1654,16 @@ def scan_url(browser, url, status_callback=None):
             results["notes"].append("No cookie consent banner found.")
             report_status("No cookie consent banner found", 7)
 
-        # ── Step 7: Post-opt-out — clear state & return to homepage ─────
+        # ── Step 7: Post-opt-out — return to homepage ─────────────────
         check_timeout("after opt-out attempt")
 
         if results["opt_out_clicked"] == "yes":
-            print(f"[*] Opt-out complete. Clearing network logs and returning to homepage...")
-            report_status("Clearing network logs after opt-out...", 8)
+            print(f"[*] Opt-out complete. Returning to homepage...")
+            report_status("Returning to homepage after opt-out...", 8)
         else:
             report_status("Preparing post-opt-out monitoring...", 8)
 
-        # 7a. CLEAR all network logs — fresh start.
-        captured_requests.clear()
-        request_details.clear()
-
-        # 7b. GO BACK to the homepage.
-        target_base = domain.replace("www.", "")
+        # 7a. GO BACK to the homepage with a fresh start.
         try:
             page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
             report_status("Returned to homepage after opt-out", 9)
@@ -1674,17 +1673,11 @@ def scan_url(browser, url, status_callback=None):
         except Exception as e:
             print(f"[!] Failed to return to homepage: {e}")
 
-        # 7c. Brief wait for homepage — no networkidle.
+        # 7b. Brief wait for homepage — no networkidle.
         page.wait_for_timeout(2000)
         check_timeout("after homepage return")
 
-        # 7d. CLEAR network logs again — we only want to capture activity
-        #     from the shop browsing flow onward.
-        captured_requests.clear()
-        request_details.clear()
-
-        # ── Step 8: Simulate real shopping behaviour ────────────────────
-        # 8a. Navigate to the shop / all-products page.
+        # ── Step 8: Navigate to shop page ─────────────────────────────
         print("[*] Looking for a Shop / All Products link...")
         report_status("Looking for Shop page...", 10)
         shop_clicked = navigate_to_shop(page)
@@ -1692,26 +1685,47 @@ def scan_url(browser, url, status_callback=None):
         if shop_clicked:
             print(f'[*] Navigated to shop page via: "{shop_clicked}"')
             report_status(f"Navigated to shop page", 11)
-            page.wait_for_timeout(3000)
+            # Wait 5 seconds for shop page to fully load.
+            page.wait_for_timeout(5000)
             check_timeout("shop page load")
         else:
             print("[!] Could not find a Shop / All Products link.")
             report_status("No shop page found — trying products on current page", 11)
             results["notes"].append("Could not find shop page link; browsing from homepage.")
 
-        # 8b. Click the first product.
+        # ── Step 9: CLEAR ALL network logs ────────────────────────────
+        # THIS IS CRITICAL: We only care about requests made AFTER the
+        # product click.  Everything before (homepage, shop page load,
+        # opt-out flow) is irrelevant noise.
+        print("[*] Clearing ALL network logs before product click...")
+        report_status("Clearing network logs — fresh start for monitoring", 12)
+        captured_requests.clear()
+        request_details.clear()
+
+        # ── Step 10: Click product and monitor for 15 seconds ─────────
         print("[*] Looking for a product to click...")
-        report_status("Browsing products...", 12)
+        report_status("Looking for first product...", 13)
         product_clicked = click_first_product(page)
 
         if product_clicked:
-            print("[*] Clicked on a product — monitoring network requests...")
-            report_status("Clicked product — monitoring network requests...", 13)
+            print("[*] Clicked on a product — waiting for page load...")
+            report_status("Clicked product — loading product page...", 14)
+            # Wait for product page to load.
             page.wait_for_timeout(3000)
             check_timeout("product page load")
 
-            # 8c. Scroll down the product page for exactly 15 seconds.
-            report_status("Scrolling product page — monitoring for 15s...", 14)
+            # Capture product page URL and screenshot for evidence.
+            results["product_page_url"] = page.url
+            product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
+            try:
+                page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
+                results["screenshot_product"] = product_ss_path
+                print(f"[*] Product page screenshot saved: {product_ss_path}")
+            except Exception as e:
+                print(f"[!] Product screenshot failed: {e}")
+
+            # Scroll the product page for exactly 15 seconds.
+            report_status("Monitoring network for 15s — scrolling product page...", 15)
             print(f"[*] Scrolling product page for {POST_PRODUCT_MONITOR}s...")
             try:
                 page.mouse.move(640, 450)
@@ -1727,15 +1741,15 @@ def scan_url(browser, url, status_callback=None):
 
             results["notes"].append(
                 f"Browsed to shop page ({shop_clicked or 'homepage'}) and "
-                f"clicked a product. Scrolled for {POST_PRODUCT_MONITOR}s."
+                f"clicked a product. Monitored for {POST_PRODUCT_MONITOR}s."
             )
         else:
             print("[!] Could not find a product to click.")
             results["notes"].append(
                 "Could not find a product to click; monitored page with scrolling instead."
             )
-            report_status("No product found — scrolling current page...", 13)
-            report_status("Scrolling page — monitoring for 15s...", 14)
+            report_status("No product found — scrolling current page...", 14)
+            report_status("Monitoring network for 15s — scrolling page...", 15)
             try:
                 page.mouse.move(640, 450)
                 scroll_end = time.time() + POST_PRODUCT_MONITOR
@@ -1756,8 +1770,9 @@ def scan_url(browser, url, status_callback=None):
         results["notes"].append(f"Scan timed out after {elapsed:.0f}s: {e}")
         report_status(f"Scan timed out after {elapsed:.0f}s — saving partial results", 15)
 
-    # ── Step 9: Check for continued tracking ────────────────────────
+    # ── Check for continued tracking ──────────────────────────────
     # Process whatever network requests were captured (even if timed out).
+    results["total_requests_captured"] = len(captured_requests)
     results["trackers_after"] = collect_tracker_hits(captured_requests)
     results["tiktok_trackers_after"] = collect_tiktok_hits(captured_requests)
 
@@ -1798,17 +1813,17 @@ def scan_url(browser, url, status_callback=None):
     print(f"\n[*] === POST-OPT-OUT NETWORK REPORT ===")
     print(f"[*] Total requests captured: {len(captured_requests)}")
     print(f"[*] Unique domains contacted: {len(request_domains)}")
-    report_status("Analyzing post-opt-out network traffic...", 15)
+    report_status("Analyzing post-opt-out network traffic...", 16)
 
     if flagged_domains:
         print(f"\n[!] FLAGGED TRACKER DOMAINS ({len(flagged_domains)}):")
         for fd, info in sorted(flagged_domains.items()):
             print(f"      - {fd}  ({info['count']} requests)  "
                   f"[matched: {info['matched_rule']}]")
-        report_status(f"Found {len(flagged_domains)} flagged tracker domains", 16)
+        report_status(f"Found {len(flagged_domains)} flagged tracker domains", 17)
     else:
         print("[*] No known tracker domains found in post-opt-out requests.")
-        report_status("No tracker domains found after opt-out", 16)
+        report_status("No tracker domains found after opt-out", 17)
 
     # Determine verdict — ONLY TikTok tracking triggers FAIL:
     #   - TikTok trackers found after opt-out  → FAIL ("yes")
@@ -1884,7 +1899,7 @@ def scan_url(browser, url, status_callback=None):
         page.screenshot(path=after_path, full_page=True, timeout=5000)
         results["screenshot_after"] = after_path
         print(f"[*] 'After' screenshot saved: {after_path}")
-        report_status("After screenshot captured", 17)
+        report_status("After screenshot captured", 18)
     except Exception as e:
         print(f"[!] Screenshot failed: {e}")
 
@@ -1916,7 +1931,7 @@ def scan_url(browser, url, status_callback=None):
         evidence_notes="; ".join(results["notes"]) if results["notes"] else None,
     )
     print(f"[*] Results saved to database (row id={row_id}).")
-    report_status("Results saved to database", 18)
+    report_status("Results saved to database", 19)
 
     # Store detailed request metadata for evidence package.
     results["request_details"] = list(request_details)
@@ -1929,7 +1944,7 @@ def scan_url(browser, url, status_callback=None):
 
     # ── Print summary ─────────────────────────────────────────────
     print_summary(results)
-    report_status("Scan complete", 19)
+    report_status("Scan complete", 20)
 
     return results
 
