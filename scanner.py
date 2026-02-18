@@ -1217,6 +1217,9 @@ SHOP_LINK_TEXTS = [
     "All products",
     "Products",
     "Collections",
+    "All",
+    "Browse All",
+    "Browse all",
     "New Arrivals",
     "New arrivals",
     "new arrivals",
@@ -1226,16 +1229,32 @@ SHOP_LINK_TEXTS = [
     "Browse",
 ]
 
+# Common shop/collection URL path patterns to try as fallback.
+SHOP_URL_PATTERNS = [
+    "/collections/all",
+    "/collections",
+    "/products",
+    "/shop",
+    "/shop-all",
+    "/catalog",
+    "/store",
+]
+
 
 def navigate_to_shop(page):
     """
     Try to find and click a link to the shop / all-products page.
 
-    Returns the link text that was clicked, or None if nothing was found.
+    Strategy:
+      1. Look for visible shop links in the main nav/header.
+      2. If not found, try opening a hamburger/mobile menu first.
+      3. If still not found, try navigating directly to common URL patterns.
+
+    Returns the link text or URL pattern that was used, or None.
     """
+    # 1. Look for visible shop links in the main navigation.
     for text in SHOP_LINK_TEXTS:
         try:
-            # Look for navigation links — typically in the header/nav.
             for selector in [
                 f'nav a:has-text("{text}")',
                 f'header a:has-text("{text}")',
@@ -1248,6 +1267,58 @@ def navigate_to_shop(page):
                     return text
         except Exception:
             continue
+
+    # 2. Try opening a hamburger / mobile menu and look again.
+    hamburger_selectors = [
+        'button[aria-label*="menu" i]',
+        'button[aria-label*="Menu" i]',
+        'button[aria-label*="nav" i]',
+        'button[class*="hamburger" i]',
+        'button[class*="menu-toggle" i]',
+        '[class*="hamburger"]',
+        '[class*="menu-toggle"]',
+        '.mobile-nav-trigger',
+        '#menu-toggle',
+        'button.navbar-toggler',
+    ]
+    menu_opened = False
+    for sel in hamburger_selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=500):
+                btn.click(timeout=3000)
+                page.wait_for_timeout(1500)
+                menu_opened = True
+                break
+        except Exception:
+            continue
+
+    if menu_opened:
+        for text in SHOP_LINK_TEXTS:
+            try:
+                locator = page.locator(f'a:has-text("{text}")').first
+                if locator.is_visible(timeout=500):
+                    locator.click(timeout=5000)
+                    return text
+            except Exception:
+                continue
+
+    # 3. Fallback: try navigating directly to common URL patterns.
+    base_url = page.url.split("?")[0].split("#")[0].rstrip("/")
+    # Get the origin (scheme + host).
+    parsed = urlparse(page.url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    for pattern in SHOP_URL_PATTERNS:
+        try:
+            target = origin + pattern
+            response = page.goto(target, timeout=15000, wait_until="domcontentloaded")
+            if response and response.status < 400:
+                print(f"[*] Navigated to {target} via URL pattern fallback")
+                return pattern
+        except Exception:
+            continue
+
     return None
 
 
@@ -1336,7 +1407,7 @@ def scan_url(browser, url, status_callback=None):
     Returns:
         A dict summarising the scan results.
     """
-    TOTAL_STEPS = 17
+    TOTAL_STEPS = 20
 
     # We'll collect results as we go and return them at the end.
     results = {
@@ -1360,6 +1431,8 @@ def scan_url(browser, url, status_callback=None):
         "opt_out_verified": "no",
         "opt_out_method": None,
         "opt_out_attempts": [],
+        # California business registration.
+        "ca_registration": None,
     }
 
     def report_status(message, step):
@@ -1417,7 +1490,21 @@ def scan_url(browser, url, status_callback=None):
         })
 
     page.on("request", on_request)
-    print("[*] Network monitoring started.")
+
+    # Intercept navigator.sendBeacon() by wrapping it with a fetch() call
+    # that Playwright can fully capture.  The original sendBeacon still fires
+    # (so the site behaves normally), but the fetch ensures we log the URL.
+    context.add_init_script("""
+        (function() {
+            const origBeacon = navigator.sendBeacon.bind(navigator);
+            navigator.sendBeacon = function(url, data) {
+                try { fetch(url, {method:'POST', body: data, keepalive: true}).catch(()=>{}); } catch(e) {}
+                return origBeacon(url, data);
+            };
+        })();
+    """)
+
+    print("[*] Network monitoring started (including sendBeacon interception).")
     report_status("Visiting website...", 2)
 
     # ── Step 3: Navigate to the website ─────────────────────────────
@@ -1505,124 +1592,114 @@ def scan_url(browser, url, status_callback=None):
         results["notes"].append("No cookie consent banner found.")
         report_status("No cookie consent banner found", 7)
 
-    # ── Step 7: Wait after opt-out ──────────────────────────────────
-    # Give the site time to actually disable trackers.
+    # ── Step 7: Post-opt-out — clear state & return to homepage ─────
+    # After opting out, we need a clean slate before simulating
+    # real browsing behaviour.  Many trackers only fire during active
+    # navigation (page transitions, product clicks, scrolling), not
+    # when sitting idle on one page.
+
     if results["opt_out_clicked"] == "yes":
-        print(f"[*] Waiting {POST_OPTOUT_WAIT}s for site to adjust "
-              "after opt-out...")
-        report_status(f"Waiting {POST_OPTOUT_WAIT}s for site to adjust...", 8)
-        page.wait_for_timeout(POST_OPTOUT_WAIT * 1000)
+        print(f"[*] Opt-out complete. Clearing network logs and returning to homepage...")
+        report_status("Clearing network logs after opt-out...", 8)
+    else:
+        report_status("Preparing post-opt-out monitoring...", 8)
 
-    # ── Step 8: Simulate real shopping behaviour ────────────────────
-    # Trackers often only fire when the user browses products, not
-    # just on the homepage.  We navigate to the shop page, click a
-    # product, and capture all requests made during that flow.
-
-    # After opt-out, verify we're still on the target domain.
-    # Some consent buttons redirect the browser away.
-    current_url_check = page.url
-    target_base = domain.replace("www.", "")
-    if target_base not in current_url_check:
-        print(f"[!] Opt-out navigated away to {current_url_check} — returning to {url}")
-        results["notes"].append(f"Opt-out redirected to {current_url_check}; returned to target.")
-        try:
-            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
-            page.wait_for_timeout(3000)
-        except PlaywrightTimeout:
-            pass
-        except Exception as e:
-            print(f"[!] Failed to navigate back: {e}")
-
-    # Clear old requests so we only capture post-opt-out activity.
+    # 7a. CLEAR all network logs — fresh start.
     captured_requests.clear()
     request_details.clear()
 
+    # 7b. GO BACK to the homepage (ensures we're on the target site
+    #     and triggers a fresh page load with post-opt-out cookie state).
+    target_base = domain.replace("www.", "")
+    try:
+        page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+        report_status("Returned to homepage after opt-out", 9)
+        print(f"[*] Returned to homepage: {url}")
+    except PlaywrightTimeout:
+        print("[!] Homepage reload timed out — continuing")
+    except Exception as e:
+        print(f"[!] Failed to return to homepage: {e}")
+
+    # 7c. WAIT for homepage to fully load.
+    page.wait_for_timeout(3000)
+
+    # 7d. CLEAR network logs again — we only want to capture activity
+    #     from the shop browsing flow onward.
+    captured_requests.clear()
+    request_details.clear()
+
+    # ── Step 8: Simulate real shopping behaviour ────────────────────
+    # Trackers often only fire when the user browses products, not
+    # just on the homepage.  We: navigate to the shop page → click a
+    # product → scroll the product page.  We capture ALL network
+    # requests during this entire flow.
+
     # 8a. Navigate to the shop / all-products page.
     print("[*] Looking for a Shop / All Products link...")
-    report_status("Looking for Shop page...", 9)
+    report_status("Looking for Shop page...", 10)
     shop_clicked = navigate_to_shop(page)
 
     if shop_clicked:
         print(f'[*] Navigated to shop page via: "{shop_clicked}"')
-        report_status(f"Navigated to shop page", 10)
-        # Wait for the shop page to fully load.
+        report_status(f"Navigated to shop page", 11)
+        # WAIT for the shop page to fully load.
         try:
             page.wait_for_load_state("networkidle", timeout=15000)
         except PlaywrightTimeout:
             pass  # some shop pages never fully idle
-        page.wait_for_timeout(3000)
-
-        # 8b. Clear again — we only care about the product click.
-        captured_requests.clear()
-        request_details.clear()
-
-        # 8c. Click the first product on the shop page.
-        print("[*] Looking for a product to click...")
-        report_status("Browsing products...", 11)
-        product_clicked = click_first_product(page)
-
-        if product_clicked:
-            print("[*] Clicked on a product — monitoring network requests...")
-            report_status("Clicked product — monitoring network requests...", 12)
-            # Wait for the product page to fully load.
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except PlaywrightTimeout:
-                pass
-            page.wait_for_timeout(5000)
-
-            # Scroll down the product page to trigger lazy trackers.
-            try:
-                page.mouse.move(640, 450)
-                for _ in range(3):
-                    page.mouse.wheel(0, 400)
-                    page.wait_for_timeout(1500)
-            except Exception:
-                pass
-            results["notes"].append("Browsed to shop page and clicked a product.")
-        else:
-            print("[!] Could not find a product to click on the shop page.")
-            results["notes"].append("Found shop page but could not click a product.")
-            # Fall back: monitor the shop page itself for a while.
-            page.wait_for_timeout(POST_OPTOUT_MONITOR * 1000)
+        page.wait_for_timeout(5000)
     else:
         print("[!] Could not find a Shop / All Products link.")
-        report_status("No shop page found — trying products on current page", 10)
+        report_status("No shop page found — trying products on current page", 11)
+        results["notes"].append("Could not find shop page link; browsing from homepage.")
 
-        # Try clicking a product directly on the homepage.
-        captured_requests.clear()
-        request_details.clear()
-        report_status("Looking for products on current page...", 11)
-        product_clicked = click_first_product(page)
+    # 8b. Click the first product.
+    print("[*] Looking for a product to click...")
+    report_status("Browsing products...", 12)
+    product_clicked = click_first_product(page)
 
-        if product_clicked:
-            print("[*] Clicked on a product from homepage — monitoring...")
-            report_status("Clicked product — monitoring network requests...", 12)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except PlaywrightTimeout:
-                pass
-            page.wait_for_timeout(5000)
+    if product_clicked:
+        print("[*] Clicked on a product — monitoring network requests...")
+        report_status("Clicked product — monitoring network requests...", 13)
+        # Wait for the product page to fully load.
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeout:
+            pass
+        page.wait_for_timeout(3000)
 
-            try:
-                page.mouse.move(640, 450)
-                for _ in range(3):
-                    page.mouse.wheel(0, 400)
-                    page.wait_for_timeout(1500)
-            except Exception:
-                pass
-            results["notes"].append("Clicked a product directly from homepage.")
-        else:
-            results["notes"].append("Could not find shop link or products; monitored homepage instead.")
-            # Fall back: scroll and interact with the homepage.
-            try:
-                page.mouse.move(640, 450)
-                for _ in range(3):
-                    page.mouse.wheel(0, 400)
-                    page.wait_for_timeout(1500)
-            except Exception:
-                pass
-            page.wait_for_timeout(POST_OPTOUT_MONITOR * 1000)
+        # 8c. Scroll down the product page slowly over ~20 seconds
+        #     to trigger scroll-based and lazy-loaded trackers.
+        report_status("Scrolling product page — monitoring for delayed trackers...", 14)
+        print("[*] Scrolling product page for 20s to trigger delayed trackers...")
+        try:
+            page.mouse.move(640, 450)
+            # 10 scroll increments over ~20 seconds.
+            for i in range(10):
+                page.mouse.wheel(0, 350)
+                page.wait_for_timeout(2000)
+        except Exception as e:
+            print(f"[!] Scroll monitoring error: {e}")
+
+        results["notes"].append(
+            f"Browsed to shop page ({shop_clicked or 'homepage'}) and "
+            "clicked a product. Scrolled for 20s."
+        )
+    else:
+        print("[!] Could not find a product to click.")
+        results["notes"].append(
+            "Could not find a product to click; monitored page with scrolling instead."
+        )
+        # Fall back: scroll and interact with the current page for ~20s.
+        report_status("No product found — scrolling current page...", 13)
+        report_status("Scrolling page — monitoring for delayed trackers...", 14)
+        try:
+            page.mouse.move(640, 450)
+            for i in range(10):
+                page.mouse.wheel(0, 350)
+                page.wait_for_timeout(2000)
+        except Exception:
+            pass
 
     # ── Step 9: Check for continued tracking ────────────────────────
     # Now look at everything the browser sent during the shopping flow.
@@ -1660,17 +1737,17 @@ def scan_url(browser, url, status_callback=None):
     print(f"\n[*] === POST-OPT-OUT NETWORK REPORT ===")
     print(f"[*] Total requests captured: {len(captured_requests)}")
     print(f"[*] Unique domains contacted: {len(request_domains)}")
-    report_status("Analyzing post-opt-out network traffic...", 13)
+    report_status("Analyzing post-opt-out network traffic...", 15)
 
     if flagged_domains:
         print(f"\n[!] FLAGGED TRACKER DOMAINS ({len(flagged_domains)}):")
         for fd, info in sorted(flagged_domains.items()):
             print(f"      - {fd}  ({info['count']} requests)  "
                   f"[matched: {info['matched_rule']}]")
-        report_status(f"Found {len(flagged_domains)} flagged tracker domains", 14)
+        report_status(f"Found {len(flagged_domains)} flagged tracker domains", 16)
     else:
         print("[*] No known tracker domains found in post-opt-out requests.")
-        report_status("No tracker domains found after opt-out", 14)
+        report_status("No tracker domains found after opt-out", 16)
 
     # Flag as a violation ONLY if opt-out was verified AND trackers still present.
     # If opt-out was not verified, mark as inconclusive regardless.
@@ -1734,7 +1811,7 @@ def scan_url(browser, url, status_callback=None):
         page.screenshot(path=after_path, full_page=True)
         results["screenshot_after"] = after_path
         print(f"[*] 'After' screenshot saved: {after_path}")
-        report_status("After screenshot captured", 15)
+        report_status("After screenshot captured", 17)
     except Exception as e:
         print(f"[!] Screenshot failed: {e}")
 
@@ -1766,7 +1843,7 @@ def scan_url(browser, url, status_callback=None):
         evidence_notes="; ".join(results["notes"]) if results["notes"] else None,
     )
     print(f"[*] Results saved to database (row id={row_id}).")
-    report_status("Results saved to database", 16)
+    report_status("Results saved to database", 18)
 
     # Store detailed request metadata for evidence package.
     results["request_details"] = list(request_details)
@@ -1774,9 +1851,19 @@ def scan_url(browser, url, status_callback=None):
     # ── Clean up ────────────────────────────────────────────────────
     context.close()
 
-    # ── Step 12: Print summary ──────────────────────────────────────
+    # ── Step 12: CA Business Registration Lookup ────────────────────
+    report_status("Looking up California business registration...", 19)
+    try:
+        from ca_lookup import lookup_ca_registration
+        ca_result = lookup_ca_registration(browser, domain)
+        results["ca_registration"] = ca_result
+    except Exception as e:
+        print(f"[!] CA registration lookup failed: {e}")
+        results["ca_registration"] = {"status": "error", "message": str(e)}
+
+    # ── Step 13: Print summary ──────────────────────────────────────
     print_summary(results)
-    report_status("Scan complete", 17)
+    report_status("Scan complete", 20)
 
     return results
 

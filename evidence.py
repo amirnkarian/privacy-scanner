@@ -631,12 +631,21 @@ def generate_demand_letter(result, output_path):
     pdf.ln(4)
 
     # ── Recipient ─────────────────────────────────────────────────
+    ca_reg = result.get("ca_registration")
+    ca_found = ca_reg and ca_reg.get("status") == "found"
+
     pdf.cell(0, 5, "VIA CERTIFIED MAIL AND EMAIL", ln=True)
     pdf.ln(2)
-    pdf.cell(0, 5, "[COMPANY LEGAL NAME]", ln=True)
+    if ca_found and ca_reg.get("entity_name"):
+        pdf.cell(0, 5, _sanitize_for_pdf(ca_reg["entity_name"]), ln=True)
+    else:
+        pdf.cell(0, 5, "[COMPANY LEGAL NAME]", ln=True)
     pdf.cell(0, 5, "Attn: Legal Department / Privacy Officer", ln=True)
-    pdf.cell(0, 5, "[Company Address]", ln=True)
-    pdf.cell(0, 5, "[City, State ZIP]", ln=True)
+    if ca_found and ca_reg.get("agent_address"):
+        pdf.cell(0, 5, _sanitize_for_pdf(ca_reg["agent_address"]), ln=True)
+    else:
+        pdf.cell(0, 5, "[Company Address]", ln=True)
+        pdf.cell(0, 5, "[City, State ZIP]", ln=True)
     pdf.ln(6)
 
     # ── Re: line ──────────────────────────────────────────────────
@@ -712,6 +721,29 @@ def generate_demand_letter(result, output_path):
         unique_cookies = sorted(set(tracking_cookies))
         for name, platform in unique_cookies:
             pdf.cell(0, 5, f"  - {name} ({platform})", ln=True)
+        pdf.ln(3)
+
+    # CA Business Registration paragraph (strengthens jurisdiction).
+    if ca_found and ca_reg.get("entity_name"):
+        pdf.set_font("Helvetica", "", 10)
+        entity_name = _sanitize_for_pdf(ca_reg["entity_name"])
+        entity_num = ca_reg.get("entity_number", "unknown")
+        entity_type = ca_reg.get("entity_type", "business entity")
+        agent_name = ca_reg.get("registered_agent")
+        agent_addr = ca_reg.get("agent_address")
+
+        ca_text = (
+            f"According to California Secretary of State records, "
+            f"{entity_name} (Entity Number: {entity_num}) is an active "
+            f"{_sanitize_for_pdf(entity_type)} registered to do business in California"
+        )
+        if agent_name:
+            ca_text += f", with {_sanitize_for_pdf(agent_name)} as its registered agent for service of process"
+            if agent_addr:
+                ca_text += f" at {_sanitize_for_pdf(agent_addr)}"
+        ca_text += "."
+
+        pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=ca_text)
         pdf.ln(3)
 
     # ── Legal violations ──────────────────────────────────────────
@@ -888,6 +920,39 @@ def generate_scan_report(result, output_path):
     pdf.cell(0, 7, f"Flagged domains (post-opt-out): {len(flagged)}", ln=True)
     pdf.ln(5)
 
+    # ── California Business Registration ──────────────────────────
+    ca_reg = result.get("ca_registration")
+    if ca_reg and ca_reg.get("status") == "found":
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 10, "California Business Registration", ln=True)
+        pdf.ln(2)
+
+        # Table header.
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_fill_color(34, 38, 57)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(45, 8, "  Field", border=1, fill=True)
+        pdf.cell(0, 8, "  Value", border=1, fill=True)
+        pdf.ln()
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 9)
+
+        ca_fields = [
+            ("Entity Name", ca_reg.get("entity_name")),
+            ("Entity Number", ca_reg.get("entity_number")),
+            ("Status", ca_reg.get("entity_status")),
+            ("Type", ca_reg.get("entity_type")),
+            ("Formation Date", ca_reg.get("formation_date")),
+            ("Registered Agent", ca_reg.get("registered_agent")),
+            ("Agent Address", ca_reg.get("agent_address")),
+        ]
+        for label, value in ca_fields:
+            if value:
+                pdf.cell(45, 7, f"  {label}", border=1)
+                pdf.cell(0, 7, f"  {_sanitize_for_pdf(str(value)[:60])}", border=1)
+                pdf.ln()
+        pdf.ln(5)
+
     # ── Scan Timeline ─────────────────────────────────────────────
     timeline = result.get("scan_timeline", [])
     if timeline:
@@ -1033,6 +1098,7 @@ def generate_evidence_log(result, output_path):
         "trackers_after": result.get("trackers_after", []),
         "all_request_domains": result.get("all_request_domains", {}),
         "notes": result.get("notes", []),
+        "ca_registration": result.get("ca_registration"),
     }
 
     with open(output_path, "w") as f:

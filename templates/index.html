@@ -601,6 +601,18 @@ header .subtitle {
     <p class="subtitle">Check if websites respect your privacy choices</p>
 </header>
 
+<button id="sound-toggle" title="Toggle sound" onclick="toggleSound()" style="
+    position: fixed; top: 14px; right: 18px; z-index: 1000;
+    background: var(--bg-card); border: 1px solid var(--border);
+    color: var(--text-secondary); border-radius: 8px;
+    width: 38px; height: 38px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem; transition: background 0.2s;
+" onmouseenter="this.style.background='var(--bg-secondary)'"
+   onmouseleave="this.style.background='var(--bg-card)'">
+    <span id="sound-icon">&#128266;</span>
+</button>
+
 <section id="search-section">
     <!-- Mode tabs -->
     <div class="mode-tabs">
@@ -667,6 +679,7 @@ header .subtitle {
                     <th>Domain</th>
                     <th>Status</th>
                     <th style="text-align:center">Trackers</th>
+                    <th style="text-align:center">CA Reg</th>
                     <th>Categories</th>
                     <th>Actions</th>
                 </tr>
@@ -700,6 +713,11 @@ header .subtitle {
             <div class="card-label">Trackers After</div>
             <div class="card-value" id="val-after">--</div>
             <div class="card-detail" id="detail-after"></div>
+        </div>
+        <div class="card" id="card-ca-reg">
+            <div class="card-label">CA Registration</div>
+            <div class="card-value" id="val-ca-reg">--</div>
+            <div class="card-detail" id="detail-ca-reg"></div>
         </div>
     </div>
 
@@ -739,6 +757,105 @@ let batchViolations = 0;
 let batchClean = 0;
 let batchTotal = 0;
 let currentMode = 'single'; // 'single' or 'batch'
+let soundEnabled = true;
+let audioCtx = null;
+
+/* ── Cha-ching sound (Web Audio API) ───────────────────── */
+function getAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+}
+
+function playChaChing() {
+    if (!soundEnabled) return;
+    try {
+        const ctx = getAudioCtx();
+        if (ctx.state === 'suspended') ctx.resume();
+        const now = ctx.currentTime;
+
+        const master = ctx.createGain();
+        master.gain.setValueAtTime(0.35, now);
+        master.connect(ctx.destination);
+
+        // Part 1: High metallic "ding" — two detuned oscillators for shimmer
+        for (const freq of [3200, 3450]) {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(freq, now);
+            osc.frequency.exponentialRampToValueAtTime(freq * 0.7, now + 0.15);
+            gain.gain.setValueAtTime(0.6, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+            osc.connect(gain);
+            gain.connect(master);
+            osc.start(now);
+            osc.stop(now + 0.2);
+        }
+
+        // Part 2: "Ka" click — noise burst
+        const bufferSize = ctx.sampleRate * 0.03;
+        const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+        const data = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.5;
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuffer;
+        const noiseGain = ctx.createGain();
+        noiseGain.gain.setValueAtTime(0.4, now + 0.06);
+        noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+        const noiseFilter = ctx.createBiquadFilter();
+        noiseFilter.type = 'highpass';
+        noiseFilter.frequency.value = 4000;
+        noise.connect(noiseFilter);
+        noiseFilter.connect(noiseGain);
+        noiseGain.connect(master);
+        noise.start(now + 0.06);
+        noise.stop(now + 0.12);
+
+        // Part 3: "Ching" — bright bell hit with harmonics
+        const bellFreqs = [2600, 3900, 5200];
+        bellFreqs.forEach((f, i) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(f, now + 0.1);
+            osc.frequency.exponentialRampToValueAtTime(f * 0.85, now + 0.55);
+            const vol = 0.4 / (i + 1);
+            gain.gain.setValueAtTime(vol, now + 0.1);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+            osc.connect(gain);
+            gain.connect(master);
+            osc.start(now + 0.1);
+            osc.stop(now + 0.55);
+        });
+
+        // Part 4: Coin rattle — rapid tiny clicks
+        for (let j = 0; j < 5; j++) {
+            const t = now + 0.12 + j * 0.03;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(6000 + j * 400, t);
+            gain.gain.setValueAtTime(0.08, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.02);
+            osc.connect(gain);
+            gain.connect(master);
+            osc.start(t);
+            osc.stop(t + 0.025);
+        }
+
+        // Fade out master
+        master.gain.setValueAtTime(0.35, now + 0.5);
+        master.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    } catch (e) {
+        // Audio not supported — fail silently
+    }
+}
+
+function toggleSound() {
+    soundEnabled = !soundEnabled;
+    document.getElementById('sound-icon').innerHTML = soundEnabled ? '&#128266;' : '&#128264;';
+    document.getElementById('sound-toggle').title = soundEnabled ? 'Mute sound' : 'Unmute sound';
+}
 
 /* ── DOM refs ───────────────────────────────────────────── */
 const scanForm        = document.getElementById('scan-form');
@@ -1002,6 +1119,7 @@ function connectBatchSSE(batchId) {
 
         if (result.still_tracking === 'yes') {
             batchViolations++;
+            playChaChing();
         } else if (result.still_tracking === 'inconclusive' || result.still_tracking === 'error') {
             // count inconclusive and errors separately — don't increment clean or violations
         } else {
@@ -1110,10 +1228,24 @@ function addBatchResultRow(url, scanId, result) {
         actions = '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
     }
 
+    // CA Registration badge
+    let caRegBadge;
+    const caReg = result.ca_registration;
+    if (caReg && caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() === 'active') {
+        caRegBadge = '<span class="badge badge-pass" title="' + (caReg.entity_name || '') + '">YES</span>';
+    } else if (caReg && caReg.status === 'not_found') {
+        caRegBadge = '<span class="badge badge-fail">NO</span>';
+    } else if (caReg && (caReg.status === 'inconclusive' || (caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() !== 'active'))) {
+        caRegBadge = '<span class="badge badge-inconclusive">CHECK</span>';
+    } else {
+        caRegBadge = '<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text-dim)">N/A</span>';
+    }
+
     row.innerHTML =
         '<td class="domain-cell">' + domain + '</td>' +
         '<td>' + statusBadge + '</td>' +
         '<td style="text-align:center; font-weight:600">' + trackerCount + '</td>' +
+        '<td style="text-align:center">' + caRegBadge + '</td>' +
         '<td class="categories-cell">' + categories + '</td>' +
         '<td><div class="actions-cell">' + actions + '</div></td>';
 
@@ -1175,6 +1307,7 @@ function displayResults(result) {
     if (result.still_tracking === 'yes') {
         banner.className = 'verdict-banner violation';
         banner.innerHTML = '<span class="icon">&#9888;</span> TRACKING VIOLATIONS DETECTED';
+        playChaChing();
     } else if (result.still_tracking === 'inconclusive') {
         banner.className = 'verdict-banner inconclusive';
         banner.innerHTML = '<span class="icon">&#9888;</span> INCONCLUSIVE — Opt-out could not be verified';
@@ -1209,6 +1342,32 @@ function displayResults(result) {
     document.getElementById('val-after').style.color = afterCount > 0 ? 'var(--danger)' : 'var(--success)';
     document.getElementById('detail-after').textContent =
         afterCount ? result.trackers_after.join(', ') : 'None detected';
+
+    // CA Registration card
+    const caReg = result.ca_registration;
+    const valCaReg = document.getElementById('val-ca-reg');
+    const detailCaReg = document.getElementById('detail-ca-reg');
+    if (caReg && caReg.status === 'found') {
+        const isActive = caReg.entity_status && caReg.entity_status.toLowerCase() === 'active';
+        valCaReg.textContent = isActive ? 'Registered' : caReg.entity_status || 'Found';
+        valCaReg.style.color = isActive ? 'var(--success)' : 'var(--warning)';
+        let detail = caReg.entity_name || '';
+        if (caReg.entity_number) detail += ' (#' + caReg.entity_number + ')';
+        if (caReg.entity_type) detail += ' - ' + caReg.entity_type;
+        detailCaReg.textContent = detail;
+    } else if (caReg && caReg.status === 'not_found') {
+        valCaReg.textContent = 'Not Found';
+        valCaReg.style.color = 'var(--danger)';
+        detailCaReg.textContent = 'No CA registration found';
+    } else if (caReg && caReg.status === 'inconclusive') {
+        valCaReg.textContent = 'Inconclusive';
+        valCaReg.style.color = 'var(--warning)';
+        detailCaReg.textContent = caReg.entity_name || 'Manual verification needed';
+    } else {
+        valCaReg.textContent = 'N/A';
+        valCaReg.style.color = 'var(--text-dim)';
+        detailCaReg.textContent = caReg && caReg.message ? caReg.message : 'Lookup unavailable';
+    }
 
     // Tracker table
     const flagged = result.flagged_domains || {};

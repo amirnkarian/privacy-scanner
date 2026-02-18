@@ -114,7 +114,7 @@ def scan_stream(scan_id):
     SSE endpoint — streams real-time progress events for a scan.
 
     Event types:
-      status     — progress update (step N of 17)
+      status     — progress update (step N of 20)
       complete   — final results payload
       scan_error — scan failed
       done       — terminal event, close the stream
@@ -226,6 +226,28 @@ def download_pdf(scan_id):
         pdf.cell(0, 12, "  CLEAN: Tracking stopped after opt-out", ln=True, fill=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(8)
+
+    # ── California Business Registration ───────────────────────
+    ca_reg = result.get("ca_registration")
+    if ca_reg and ca_reg.get("status") == "found":
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 10, "California Business Registration", ln=True)
+        pdf.set_font("Helvetica", "", 11)
+        if ca_reg.get("entity_name"):
+            pdf.cell(0, 7, f"Entity Name: {ca_reg['entity_name']}", ln=True)
+        if ca_reg.get("entity_number"):
+            pdf.cell(0, 7, f"Entity Number: {ca_reg['entity_number']}", ln=True)
+        if ca_reg.get("entity_status"):
+            pdf.cell(0, 7, f"Status: {ca_reg['entity_status']}", ln=True)
+        if ca_reg.get("entity_type"):
+            pdf.cell(0, 7, f"Type: {ca_reg['entity_type']}", ln=True)
+        if ca_reg.get("formation_date"):
+            pdf.cell(0, 7, f"Formation Date: {ca_reg['formation_date']}", ln=True)
+        if ca_reg.get("registered_agent"):
+            pdf.cell(0, 7, f"Registered Agent: {ca_reg['registered_agent']}", ln=True)
+        if ca_reg.get("agent_address"):
+            pdf.cell(0, 7, f"Agent Address: {ca_reg['agent_address']}", ln=True)
+        pdf.ln(5)
 
     # ── Scan details ───────────────────────────────────────────
     pdf.set_font("Helvetica", "B", 14)
@@ -395,7 +417,7 @@ def start_batch_scan():
                             "total": len(urls),
                             "message": f"Starting scan of {url}",
                             "step": 0,
-                            "total_steps": 17,
+                            "total_steps": 20,
                         },
                     })
 
