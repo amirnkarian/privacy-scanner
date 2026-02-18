@@ -58,13 +58,14 @@ POST_PRODUCT_MONITOR = 15
 TIKTOK_TRACKER_DOMAINS = [
     "analytics.tiktok.com",
     "analytics-ipv6.tiktokw.us",
+    "www.tiktok.com",
     "business-api.tiktok.com",
+    "mcs-va.tiktok.com",
+    "mon.tiktok.com",
 ]
 
-TIKTOK_TRACKER_URL_PATTERNS = [
-    "tiktok.com/analytics",
-    "www.tiktok.com/api",
-]
+# Frozen set for O(1) exact hostname lookups — NO substring matching.
+_TIKTOK_DOMAIN_SET = frozenset(TIKTOK_TRACKER_DOMAINS)
 
 TIKTOK_COOKIES = ["_ttp", "_tt_enable_cookie"]
 
@@ -274,13 +275,17 @@ def collect_tracker_hits(captured_requests):
 
 
 def is_tiktok_request(request_url):
-    """Check if a network request URL matches a known TikTok tracker."""
-    for domain in TIKTOK_TRACKER_DOMAINS:
-        if domain in request_url:
-            return domain
-    for pattern in TIKTOK_TRACKER_URL_PATTERNS:
-        if pattern in request_url:
-            return pattern
+    """Check if a request URL goes to an EXACT TikTok tracker domain.
+
+    Uses urlparse to extract the hostname — no substring matching.
+    Returns the matched hostname, or None.
+    """
+    try:
+        hostname = urlparse(request_url).hostname
+        if hostname and hostname.lower() in _TIKTOK_DOMAIN_SET:
+            return hostname.lower()
+    except Exception:
+        pass
     return None
 
 
@@ -292,6 +297,15 @@ def collect_tiktok_hits(captured_requests):
         if match:
             found.add(match)
     return sorted(found)
+
+
+def collect_tiktok_urls(captured_requests):
+    """Return list of full URLs that matched TikTok tracker domains."""
+    urls = []
+    for url in captured_requests:
+        if is_tiktok_request(url):
+            urls.append(url)
+    return urls
 
 
 def try_click_button(page, button_texts, timeout=3000):
@@ -1617,6 +1631,11 @@ def scan_url(browser, url, status_callback=None):
     # API calls, tracking pixels, etc.), we record the URL.
     captured_requests = []
     request_details = []
+    # These will be replaced at STEP 5 with fresh lists + a new listener.
+    # Initialized here so post-processing always has valid references
+    # even if STEP 5 is never reached (timeout).
+    captured_requests_after = []
+    request_details_after = []
 
     def on_request(request):
         captured_requests.append(request.url)
@@ -1702,6 +1721,14 @@ def scan_url(browser, url, status_callback=None):
         results["cookies_before_details"] = all_cookies
         tp_cookies_before = find_third_party_cookies(all_cookies, domain)
 
+        # ── DIAGNOSTIC: Log TikTok requests found BEFORE opt-out ───────
+        tiktok_before_urls = collect_tiktok_urls(captured_requests)
+        tiktok_before_domains = collect_tiktok_hits(captured_requests)
+        print(f"\n>>> BEFORE OPT-OUT: Found {len(tiktok_before_urls)} TikTok requests: "
+              f"{tiktok_before_domains}")
+        for tu in tiktok_before_urls:
+            print(f">>>   {tu[:120]}")
+
         if results["trackers_before"]:
             print(f"[*] Trackers found BEFORE opt-out ({len(results['trackers_before'])}):")
             for t in results["trackers_before"]:
@@ -1756,14 +1783,18 @@ def scan_url(browser, url, status_callback=None):
             print(f"[!] STEP 2: Opt-out failed ({e}) — skipping to next step")
             results["notes"].append(f"Opt-out step failed: {e}")
 
+        # ── DIAGNOSTIC: Log opt-out result ──────────────────────────────
         if results["opt_out_verified"] == "yes":
+            print(f"\n>>> OPT-OUT COMPLETED: {results['opt_out_method']}")
             report_status(f'Opted out via: {results["opt_out_method"]}', 7)
         elif results["opt_out_clicked"] == "yes":
+            print(f"\n>>> OPT-OUT CLICKED (unverified): {results.get('opt_out_method', 'unknown')}")
             results["notes"].append(
                 "Opt-out was clicked but banner may still be visible — unverified."
             )
             report_status("Opt-out clicked but banner still visible", 7)
         else:
+            print(f"\n>>> OPT-OUT NOT FOUND — no banner/link detected")
             results["notes"].append("No cookie consent banner found.")
             report_status("No cookie consent banner found", 7)
 
@@ -1917,15 +1948,45 @@ def scan_url(browser, url, status_callback=None):
             print(f"[!] STEP 4: Product click failed ({e}) — skipping to next step")
             results["notes"].append(f"Product click step failed: {e}")
 
-        # ── STEP 5: CLEAR ALL network logs ─────────────────────────────
-        print("STEP 5: Clearing ALL network logs — fresh start")
+        # ── STEP 5: CLEAR ALL network logs — fresh listener ────────────
+        # Remove the old listener entirely and create brand new lists
+        # with a NEW listener. This guarantees zero contamination from
+        # pre-opt-out requests.
+        print("STEP 5: Removing old listener, creating fresh capture lists")
         report_status("STEP 5: Clearing network logs", 14)
-        captured_requests.clear()
-        request_details.clear()
+        try:
+            page.remove_listener("request", on_request)
+        except Exception:
+            pass
+        captured_requests_after = []
+        request_details_after = []
+
+        def on_request_after(request):
+            captured_requests_after.append(request.url)
+            try:
+                headers = dict(request.headers) if request.headers else {}
+            except Exception:
+                headers = {}
+            try:
+                post_data_length = len(request.post_data) if request.post_data else 0
+            except Exception:
+                post_data_length = 0
+            request_details_after.append({
+                "url": request.url,
+                "method": request.method,
+                "resource_type": request.resource_type,
+                "post_data_length": post_data_length,
+                "timestamp": time.time(),
+                "headers": headers,
+            })
+
+        page.on("request", on_request_after)
+        print(">>> NETWORK LOGS CLEARED — fresh listener attached")
 
         # ── STEP 6: Take product page screenshot BEFORE scrolling ──────
         # Capture while product image, name, price are visible at top.
         current_url = page.url
+        print(f"\n>>> BROWSING PRODUCT PAGE: {current_url}")
         print(f"STEP 6: Taking screenshot on: {current_url}")
         report_status("STEP 6: Taking product page screenshot", 14)
         results["product_page_url"] = current_url
@@ -1961,10 +2022,14 @@ def scan_url(browser, url, status_callback=None):
         except Exception as e:
             print(f"STEP 7: Wait interrupted ({e}) — continuing with what we captured")
 
-        tiktok_found = len([u for u in captured_requests
-                           if any(td in u for td in TIKTOK_TRACKER_DOMAINS)])
-        print(f"STEP 7: Captured {len(captured_requests)} requests, "
-              f"{tiktok_found} to TikTok domains")
+        # ── DIAGNOSTIC: Log AFTER OPT-OUT TikTok requests ──────────────
+        tiktok_after_urls = collect_tiktok_urls(captured_requests_after)
+        tiktok_after_domains = collect_tiktok_hits(captured_requests_after)
+        print(f"\n>>> AFTER OPT-OUT: Found {len(tiktok_after_urls)} TikTok requests: "
+              f"{tiktok_after_domains}")
+        for tu in tiktok_after_urls:
+            print(f">>>   {tu[:120]}")
+        print(f">>> Total requests in after-window: {len(captured_requests_after)}")
 
         if on_product_page:
             results["notes"].append(
@@ -1981,13 +2046,13 @@ def scan_url(browser, url, status_callback=None):
         report_status(f"Scan timed out after {elapsed:.0f}s — saving partial results", 15)
 
     # ── Check for continued tracking ──────────────────────────────
-    # Process whatever network requests were captured (even if timed out).
-    results["total_requests_captured"] = len(captured_requests)
-    results["trackers_after"] = collect_tracker_hits(captured_requests)
-    results["tiktok_trackers_after"] = collect_tiktok_hits(captured_requests)
+    # Process ONLY requests captured by the NEW listener (after STEP 5).
+    results["total_requests_captured"] = len(captured_requests_after)
+    results["trackers_after"] = collect_tracker_hits(captured_requests_after)
+    results["tiktok_trackers_after"] = collect_tiktok_hits(captured_requests_after)
 
     # Group ALL post-opt-out requests by domain for the detailed report.
-    request_domains = group_requests_by_domain(captured_requests)
+    request_domains = group_requests_by_domain(captured_requests_after)
 
     # Flag every request domain that matches a tracker.
     flagged_domains = {}
@@ -2021,7 +2086,7 @@ def scan_url(browser, url, status_callback=None):
 
     # ── Print detailed network report ──────────────────────────────
     print(f"\n[*] === POST-OPT-OUT NETWORK REPORT ===")
-    print(f"[*] Total requests captured: {len(captured_requests)}")
+    print(f"[*] Total requests captured (after window): {len(captured_requests_after)}")
     print(f"[*] Unique domains contacted: {len(request_domains)}")
     report_status("Analyzing post-opt-out network traffic...", 16)
 
@@ -2045,10 +2110,19 @@ def scan_url(browser, url, status_callback=None):
     # evidence but do NOT affect the pass/fail determination.
     if results["tiktok_trackers_after"] and results["opt_out_clicked"] == "yes":
         results["still_tracking"] = "yes"
+        print(f"\n>>> VERDICT: FAIL — {len(results['tiktok_trackers_after'])} TikTok domains "
+              f"found after opt-out: {results['tiktok_trackers_after']}")
     elif timed_out:
         results["still_tracking"] = "timeout"
+        print(f"\n>>> VERDICT: TIMEOUT — scan exceeded {MAX_SCAN_TIME}s limit")
     elif results["opt_out_clicked"] != "yes":
         results["still_tracking"] = "inconclusive"
+        print(f"\n>>> VERDICT: INCONCLUSIVE — opt-out was not clicked "
+              f"(opt_out_found={results['opt_out_found']}, "
+              f"opt_out_clicked={results['opt_out_clicked']})")
+    else:
+        print(f"\n>>> VERDICT: PASS — no TikTok tracking after opt-out "
+              f"({len(captured_requests_after)} total requests captured)")
 
     if new_tp_cookie_domains:
         # Check if any new third-party cookie domains match known trackers.
@@ -2144,7 +2218,7 @@ def scan_url(browser, url, status_callback=None):
     report_status("Results saved to database", 19)
 
     # Store detailed request metadata for evidence package.
-    results["request_details"] = list(request_details)
+    results["request_details"] = list(request_details_after)
 
     # ── Clean up ────────────────────────────────────────────────────
     _hard_timer.cancel()  # Disarm the hard timeout if scan finished in time.
