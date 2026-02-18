@@ -1561,206 +1561,192 @@ def scan_url(browser, url, status_callback=None):
     timed_out = False
     all_cookies = []
     tp_cookies_before = []
-    try:  # Global ScanTimeout wrapper — catches 2-minute limit
-      try:
+    safe_domain = domain.replace(":", "_")  # handle ports in domain
+    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+    try:
         page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
         print(f"[*] Page loaded: {url}")
         report_status("Page loaded successfully", 3)
-      except PlaywrightTimeout:
+    except PlaywrightTimeout:
         print(f"[!] Page load timed out after {PAGE_LOAD_TIMEOUT // 1000}s — "
               "continuing with what we have.")
         results["notes"].append("Page load timed out.")
-      except Exception as e:
+    except Exception as e:
         print(f"[!] Error loading page: {e}")
         results["notes"].append(f"Page load error: {e}")
         context.close()
         return results
 
-    # Give any lazy-loaded scripts a moment to fire.
-    page.wait_for_timeout(2000)
-    check_timeout("after page load")
+    try:  # Global ScanTimeout wrapper — catches 2-minute limit
 
-    # ── Step 4: Take "before" screenshot ────────────────────────────
-    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-    safe_domain = domain.replace(":", "_")  # handle ports in domain
-    before_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_before.png")
-    try:
-        page.screenshot(path=before_path, full_page=True)
-        results["screenshot_before"] = before_path
-        print(f"[*] 'Before' screenshot saved: {before_path}")
-        report_status("Before screenshot captured", 4)
-    except Exception as e:
-        print(f"[!] Screenshot failed: {e}")
+        # Give any lazy-loaded scripts a moment to fire.
+        page.wait_for_timeout(2000)
+        check_timeout("after page load")
 
-    check_timeout("before opt-out")
-
-    # ── Step 5: Record initial trackers ─────────────────────────────
-    # Check every request we captured against our tracker list.
-    results["trackers_before"] = collect_tracker_hits(captured_requests)
-
-    # Also check for third-party cookies.
-    all_cookies = context.cookies()
-    results["cookies_before_details"] = all_cookies
-    tp_cookies_before = find_third_party_cookies(all_cookies, domain)
-
-    if results["trackers_before"]:
-        print(f"[*] Trackers found BEFORE opt-out ({len(results['trackers_before'])}):")
-        for t in results["trackers_before"]:
-            print(f"      - {t}")
-        report_status(f"Initial trackers identified: {len(results['trackers_before'])} found", 5)
-    else:
-        print("[*] No known trackers detected before opt-out.")
-        report_status("No known trackers detected on initial load", 5)
-
-    if tp_cookies_before:
-        cookie_domains = sorted({c["domain"] for c in tp_cookies_before})
-        print(f"[*] Third-party cookies found ({len(tp_cookies_before)}):")
-        for d in cookie_domains:
-            print(f"      - {d}")
-        results["notes"].append(
-            f"Third-party cookies before opt-out: {json.dumps(cookie_domains)}"
-        )
-
-    # ── Step 6: Find and click the opt-out button ───────────────────
-    print("[*] Looking for cookie consent opt-out button...")
-    report_status("Looking for cookie consent opt-out button...", 6)
-
-    optout_result = attempt_cookie_optout(page, domain, safe_domain=safe_domain)
-    results["opt_out_found"] = optout_result["opt_out_found"]
-    results["opt_out_clicked"] = optout_result["opt_out_clicked"]
-    results["opt_out_verified"] = optout_result["opt_out_verified"]
-    results["opt_out_method"] = optout_result["opt_out_method"]
-    results["opt_out_attempts"] = optout_result["opt_out_attempts"]
-
-    # Store opt-out screenshots
-    optout_screenshots = optout_result.get("screenshots", {})
-    if optout_screenshots:
-        results["screenshot_optout"] = optout_screenshots.get("optout_after") or optout_screenshots.get("optout_final")
-        results["optout_screenshots"] = optout_screenshots
-
-    if results["opt_out_verified"] == "yes":
-        report_status(f'Opted out via: {results["opt_out_method"]}', 7)
-    elif results["opt_out_clicked"] == "yes":
-        results["notes"].append(
-            "Opt-out was clicked but banner may still be visible — unverified."
-        )
-        report_status("Opt-out clicked but banner still visible", 7)
-    else:
-        results["notes"].append("No cookie consent banner found.")
-        report_status("No cookie consent banner found", 7)
-
-    # ── Step 7: Post-opt-out — clear state & return to homepage ─────
-    # After opting out, we need a clean slate before simulating
-    # real browsing behaviour.  Many trackers only fire during active
-    # navigation (page transitions, product clicks, scrolling), not
-    # when sitting idle on one page.
-
-    check_timeout("after opt-out attempt")
-
-    if results["opt_out_clicked"] == "yes":
-        print(f"[*] Opt-out complete. Clearing network logs and returning to homepage...")
-        report_status("Clearing network logs after opt-out...", 8)
-    else:
-        report_status("Preparing post-opt-out monitoring...", 8)
-
-    # 7a. CLEAR all network logs — fresh start.
-    captured_requests.clear()
-    request_details.clear()
-
-    # 7b. GO BACK to the homepage (ensures we're on the target site
-    #     and triggers a fresh page load with post-opt-out cookie state).
-    target_base = domain.replace("www.", "")
-    try:
-        page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
-        report_status("Returned to homepage after opt-out", 9)
-        print(f"[*] Returned to homepage: {url}")
-    except PlaywrightTimeout:
-        print("[!] Homepage reload timed out — continuing")
-    except Exception as e:
-        print(f"[!] Failed to return to homepage: {e}")
-
-    # 7c. Brief wait for homepage — no networkidle.
-    page.wait_for_timeout(2000)
-    check_timeout("after homepage return")
-
-    # 7d. CLEAR network logs again — we only want to capture activity
-    #     from the shop browsing flow onward.
-    captured_requests.clear()
-    request_details.clear()
-
-    # ── Step 8: Simulate real shopping behaviour ────────────────────
-    # Trackers often only fire when the user browses products, not
-    # just on the homepage.  We: navigate to the shop page → click a
-    # product → scroll the product page.  We capture ALL network
-    # requests during this entire flow.
-
-    # 8a. Navigate to the shop / all-products page.
-    print("[*] Looking for a Shop / All Products link...")
-    report_status("Looking for Shop page...", 10)
-    shop_clicked = navigate_to_shop(page)
-
-    if shop_clicked:
-        print(f'[*] Navigated to shop page via: "{shop_clicked}"')
-        report_status(f"Navigated to shop page", 11)
-        # Fixed wait — never use networkidle (some sites never stop).
-        page.wait_for_timeout(3000)
-        check_timeout("shop page load")
-    else:
-        print("[!] Could not find a Shop / All Products link.")
-        report_status("No shop page found — trying products on current page", 11)
-        results["notes"].append("Could not find shop page link; browsing from homepage.")
-
-    # 8b. Click the first product.
-    print("[*] Looking for a product to click...")
-    report_status("Browsing products...", 12)
-    product_clicked = click_first_product(page)
-
-    if product_clicked:
-        print("[*] Clicked on a product — monitoring network requests...")
-        report_status("Clicked product — monitoring network requests...", 13)
-        # Fixed wait — never use networkidle.
-        page.wait_for_timeout(3000)
-        check_timeout("product page load")
-
-        # 8c. Scroll down the product page for exactly 15 seconds
-        #     using a simple sleep timer — no networkidle waits.
-        report_status("Scrolling product page — monitoring for 15s...", 14)
-        print(f"[*] Scrolling product page for {POST_PRODUCT_MONITOR}s...")
+        # ── Step 4: Take "before" screenshot ────────────────────────────
+        before_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_before.png")
         try:
-            page.mouse.move(640, 450)
-            scroll_end = time.time() + POST_PRODUCT_MONITOR
-            while time.time() < scroll_end:
-                page.mouse.wheel(0, 350)
-                page.wait_for_timeout(1500)
-                check_timeout("post-product scrolling")
-        except ScanTimeout:
-            raise
+            page.screenshot(path=before_path, full_page=True)
+            results["screenshot_before"] = before_path
+            print(f"[*] 'Before' screenshot saved: {before_path}")
+            report_status("Before screenshot captured", 4)
         except Exception as e:
-            print(f"[!] Scroll monitoring error: {e}")
+            print(f"[!] Screenshot failed: {e}")
 
-        results["notes"].append(
-            f"Browsed to shop page ({shop_clicked or 'homepage'}) and "
-            f"clicked a product. Scrolled for {POST_PRODUCT_MONITOR}s."
-        )
-    else:
-        print("[!] Could not find a product to click.")
-        results["notes"].append(
-            "Could not find a product to click; monitored page with scrolling instead."
-        )
-        # Fall back: scroll the current page for 15 seconds.
-        report_status("No product found — scrolling current page...", 13)
-        report_status("Scrolling page — monitoring for 15s...", 14)
+        check_timeout("before opt-out")
+
+        # ── Step 5: Record initial trackers ─────────────────────────────
+        # Check every request we captured against our tracker list.
+        results["trackers_before"] = collect_tracker_hits(captured_requests)
+
+        # Also check for third-party cookies.
+        all_cookies = context.cookies()
+        results["cookies_before_details"] = all_cookies
+        tp_cookies_before = find_third_party_cookies(all_cookies, domain)
+
+        if results["trackers_before"]:
+            print(f"[*] Trackers found BEFORE opt-out ({len(results['trackers_before'])}):")
+            for t in results["trackers_before"]:
+                print(f"      - {t}")
+            report_status(f"Initial trackers identified: {len(results['trackers_before'])} found", 5)
+        else:
+            print("[*] No known trackers detected before opt-out.")
+            report_status("No known trackers detected on initial load", 5)
+
+        if tp_cookies_before:
+            cookie_domains = sorted({c["domain"] for c in tp_cookies_before})
+            print(f"[*] Third-party cookies found ({len(tp_cookies_before)}):")
+            for d in cookie_domains:
+                print(f"      - {d}")
+            results["notes"].append(
+                f"Third-party cookies before opt-out: {json.dumps(cookie_domains)}"
+            )
+
+        # ── Step 6: Find and click the opt-out button ───────────────────
+        print("[*] Looking for cookie consent opt-out button...")
+        report_status("Looking for cookie consent opt-out button...", 6)
+
+        optout_result = attempt_cookie_optout(page, domain, safe_domain=safe_domain)
+        results["opt_out_found"] = optout_result["opt_out_found"]
+        results["opt_out_clicked"] = optout_result["opt_out_clicked"]
+        results["opt_out_verified"] = optout_result["opt_out_verified"]
+        results["opt_out_method"] = optout_result["opt_out_method"]
+        results["opt_out_attempts"] = optout_result["opt_out_attempts"]
+
+        # Store opt-out screenshots
+        optout_screenshots = optout_result.get("screenshots", {})
+        if optout_screenshots:
+            results["screenshot_optout"] = optout_screenshots.get("optout_after") or optout_screenshots.get("optout_final")
+            results["optout_screenshots"] = optout_screenshots
+
+        if results["opt_out_verified"] == "yes":
+            report_status(f'Opted out via: {results["opt_out_method"]}', 7)
+        elif results["opt_out_clicked"] == "yes":
+            results["notes"].append(
+                "Opt-out was clicked but banner may still be visible — unverified."
+            )
+            report_status("Opt-out clicked but banner still visible", 7)
+        else:
+            results["notes"].append("No cookie consent banner found.")
+            report_status("No cookie consent banner found", 7)
+
+        # ── Step 7: Post-opt-out — clear state & return to homepage ─────
+        check_timeout("after opt-out attempt")
+
+        if results["opt_out_clicked"] == "yes":
+            print(f"[*] Opt-out complete. Clearing network logs and returning to homepage...")
+            report_status("Clearing network logs after opt-out...", 8)
+        else:
+            report_status("Preparing post-opt-out monitoring...", 8)
+
+        # 7a. CLEAR all network logs — fresh start.
+        captured_requests.clear()
+        request_details.clear()
+
+        # 7b. GO BACK to the homepage.
+        target_base = domain.replace("www.", "")
         try:
-            page.mouse.move(640, 450)
-            scroll_end = time.time() + POST_PRODUCT_MONITOR
-            while time.time() < scroll_end:
-                page.mouse.wheel(0, 350)
-                page.wait_for_timeout(1500)
-                check_timeout("fallback scrolling")
-        except ScanTimeout:
-            raise
-        except Exception:
-            pass
+            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+            report_status("Returned to homepage after opt-out", 9)
+            print(f"[*] Returned to homepage: {url}")
+        except PlaywrightTimeout:
+            print("[!] Homepage reload timed out — continuing")
+        except Exception as e:
+            print(f"[!] Failed to return to homepage: {e}")
+
+        # 7c. Brief wait for homepage — no networkidle.
+        page.wait_for_timeout(2000)
+        check_timeout("after homepage return")
+
+        # 7d. CLEAR network logs again — we only want to capture activity
+        #     from the shop browsing flow onward.
+        captured_requests.clear()
+        request_details.clear()
+
+        # ── Step 8: Simulate real shopping behaviour ────────────────────
+        # 8a. Navigate to the shop / all-products page.
+        print("[*] Looking for a Shop / All Products link...")
+        report_status("Looking for Shop page...", 10)
+        shop_clicked = navigate_to_shop(page)
+
+        if shop_clicked:
+            print(f'[*] Navigated to shop page via: "{shop_clicked}"')
+            report_status(f"Navigated to shop page", 11)
+            page.wait_for_timeout(3000)
+            check_timeout("shop page load")
+        else:
+            print("[!] Could not find a Shop / All Products link.")
+            report_status("No shop page found — trying products on current page", 11)
+            results["notes"].append("Could not find shop page link; browsing from homepage.")
+
+        # 8b. Click the first product.
+        print("[*] Looking for a product to click...")
+        report_status("Browsing products...", 12)
+        product_clicked = click_first_product(page)
+
+        if product_clicked:
+            print("[*] Clicked on a product — monitoring network requests...")
+            report_status("Clicked product — monitoring network requests...", 13)
+            page.wait_for_timeout(3000)
+            check_timeout("product page load")
+
+            # 8c. Scroll down the product page for exactly 15 seconds.
+            report_status("Scrolling product page — monitoring for 15s...", 14)
+            print(f"[*] Scrolling product page for {POST_PRODUCT_MONITOR}s...")
+            try:
+                page.mouse.move(640, 450)
+                scroll_end = time.time() + POST_PRODUCT_MONITOR
+                while time.time() < scroll_end:
+                    page.mouse.wheel(0, 350)
+                    page.wait_for_timeout(1500)
+                    check_timeout("post-product scrolling")
+            except ScanTimeout:
+                raise
+            except Exception as e:
+                print(f"[!] Scroll monitoring error: {e}")
+
+            results["notes"].append(
+                f"Browsed to shop page ({shop_clicked or 'homepage'}) and "
+                f"clicked a product. Scrolled for {POST_PRODUCT_MONITOR}s."
+            )
+        else:
+            print("[!] Could not find a product to click.")
+            results["notes"].append(
+                "Could not find a product to click; monitored page with scrolling instead."
+            )
+            report_status("No product found — scrolling current page...", 13)
+            report_status("Scrolling page — monitoring for 15s...", 14)
+            try:
+                page.mouse.move(640, 450)
+                scroll_end = time.time() + POST_PRODUCT_MONITOR
+                while time.time() < scroll_end:
+                    page.mouse.wheel(0, 350)
+                    page.wait_for_timeout(1500)
+                    check_timeout("fallback scrolling")
+            except ScanTimeout:
+                raise
+            except Exception:
+                pass
 
     except ScanTimeout as e:
         # Global 2-minute timeout hit — save whatever we captured.
