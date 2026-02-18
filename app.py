@@ -45,8 +45,34 @@ def _sanitize_for_pdf(text):
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def _save_result_to_disk(scan_id, result):
+    """Persist the scan result dict as JSON so downloads survive server restarts."""
+    try:
+        result_path = os.path.join(EVIDENCE_DIR, f"{scan_id}_result.json")
+        with open(result_path, "w") as f:
+            json.dump(result, f)
+    except Exception as e:
+        print(f"[!] Failed to save result JSON for {scan_id}: {e}")
+
+
+def _load_result_from_disk(scan_id):
+    """Load a previously saved scan result from disk. Returns dict or None."""
+    result_path = os.path.join(EVIDENCE_DIR, f"{scan_id}_result.json")
+    if not os.path.exists(result_path):
+        return None
+    try:
+        with open(result_path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[!] Failed to load result JSON for {scan_id}: {e}")
+        return None
+
+
 def _pregenerate_evidence(scan_id, result):
     """Pre-generate the evidence ZIP in a background thread so it's ready for download."""
+    # Always save the result JSON to disk (needed for PDF/evidence regeneration).
+    _save_result_to_disk(scan_id, result)
+
     if result.get("still_tracking") not in ("yes", "inconclusive"):
         return  # No violations — no evidence to generate.
 
@@ -202,17 +228,20 @@ def scan_stream(scan_id):
 @app.route("/api/scan/<scan_id>/result")
 def scan_result(scan_id):
     """Get the final result of a completed scan as JSON."""
-    if scan_id not in active_scans:
-        return jsonify({"error": "Scan not found"}), 404
+    if scan_id in active_scans:
+        scan = active_scans[scan_id]
+        if not scan["done"]:
+            return jsonify({"status": "in_progress"}), 202
+        if scan["error"]:
+            return jsonify({"error": scan["error"]}), 500
+        return jsonify(scan["result"])
 
-    scan = active_scans[scan_id]
-    if not scan["done"]:
-        return jsonify({"status": "in_progress"}), 202
+    # Not in memory — check disk.
+    result = _load_result_from_disk(scan_id)
+    if result is not None:
+        return jsonify(result)
 
-    if scan["error"]:
-        return jsonify({"error": scan["error"]}), 500
-
-    return jsonify(scan["result"])
+    return jsonify({"error": "Scan not found"}), 404
 
 
 @app.route("/screenshots/<path:filename>")
@@ -224,14 +253,18 @@ def serve_screenshot(filename):
 @app.route("/api/scan/<scan_id>/pdf")
 def download_pdf(scan_id):
     """Generate and return a PDF privacy compliance report."""
-    if scan_id not in active_scans:
+    # Try in-memory first, then fall back to disk.
+    result = None
+    if scan_id in active_scans:
+        scan = active_scans[scan_id]
+        if not scan["done"] or not scan["result"]:
+            return jsonify({"error": "Scan not yet complete", "retry": True}), 202
+        result = scan["result"]
+    else:
+        result = _load_result_from_disk(scan_id)
+
+    if result is None:
         return jsonify({"error": "Scan not found", "retry": False}), 404
-
-    scan = active_scans[scan_id]
-    if not scan["done"] or not scan["result"]:
-        return jsonify({"error": "Scan not yet complete", "retry": True}), 202
-
-    result = scan["result"]
 
     try:
         pdf_bytes = _generate_pdf_report(result)
@@ -423,14 +456,20 @@ def _generate_pdf_report(result):
 @app.route("/api/scan/<scan_id>/evidence")
 def download_evidence(scan_id):
     """Generate and return a legal evidence package as a ZIP file."""
-    if scan_id not in active_scans:
+    # Try in-memory first, then fall back to disk.
+    result = None
+    if scan_id in active_scans:
+        scan = active_scans[scan_id]
+        if not scan["done"] or not scan["result"]:
+            return jsonify({"error": "Scan not yet complete", "retry": True}), 202
+        result = scan["result"]
+    else:
+        # Not in memory — check disk for saved result.
+        result = _load_result_from_disk(scan_id)
+
+    if result is None:
         return jsonify({"error": "Scan not found", "retry": False}), 404
 
-    scan = active_scans[scan_id]
-    if not scan["done"] or not scan["result"]:
-        return jsonify({"error": "Scan not yet complete", "retry": True}), 202
-
-    result = scan["result"]
     if result.get("still_tracking") not in ("yes", "inconclusive"):
         return jsonify({
             "error": "No violations found -- evidence package only available for violations",
