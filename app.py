@@ -156,7 +156,7 @@ def scan_stream(scan_id):
     SSE endpoint — streams real-time progress events for a scan.
 
     Event types:
-      status     — progress update (step N of 20)
+      status     — progress update (step N of 19)
       complete   — final results payload
       scan_error — scan failed
       done       — terminal event, close the stream
@@ -288,24 +288,6 @@ def _generate_pdf_report(result):
     pdf.set_text_color(0, 0, 0)
     pdf.ln(8)
 
-    # ── California Business Registration ───────────────────────
-    ca_reg = result.get("ca_registration")
-    if ca_reg and ca_reg.get("status") == "found":
-        pdf.set_font("Helvetica", "B", 14)
-        pdf.cell(0, 10, "California Business Registration", ln=True)
-        pdf.set_font("Helvetica", "", 11)
-        for label, key in [("Entity Name", "entity_name"),
-                           ("Entity Number", "entity_number"),
-                           ("Status", "entity_status"),
-                           ("Type", "entity_type"),
-                           ("Formation Date", "formation_date"),
-                           ("Registered Agent", "registered_agent"),
-                           ("Agent Address", "agent_address")]:
-            val = ca_reg.get(key)
-            if val:
-                pdf.cell(0, 7, _sanitize_for_pdf(f"{label}: {val}"), ln=True)
-        pdf.ln(5)
-
     # ── Scan details ───────────────────────────────────────────
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 10, "Scan Details", ln=True)
@@ -340,7 +322,7 @@ def _generate_pdf_report(result):
         # TikTok section (primary — red highlight)
         if tiktok_flagged:
             pdf.set_font("Helvetica", "B", 14)
-            pdf.cell(0, 10, "TikTok Trackers (Post-Opt-Out) — VIOLATION", ln=True)
+            pdf.cell(0, 10, "TikTok Trackers (Post-Opt-Out) - VIOLATION", ln=True)
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 9)
             pdf.set_fill_color(255, 71, 87)
@@ -519,7 +501,7 @@ def start_batch_scan():
                             "total": len(urls),
                             "message": f"Starting scan of {url}",
                             "step": 0,
-                            "total_steps": 20,
+                            "total_steps": 19,
                         },
                     })
 

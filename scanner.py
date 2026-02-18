@@ -1447,7 +1447,7 @@ def scan_url(browser, url, status_callback=None):
     Returns:
         A dict summarising the scan results.
     """
-    TOTAL_STEPS = 20
+    TOTAL_STEPS = 19
 
     # We'll collect results as we go and return them at the end.
     results = {
@@ -1472,8 +1472,6 @@ def scan_url(browser, url, status_callback=None):
         "opt_out_verified": "no",
         "opt_out_method": None,
         "opt_out_attempts": [],
-        # California business registration.
-        "ca_registration": None,
     }
 
     def report_status(message, step):
@@ -1901,19 +1899,9 @@ def scan_url(browser, url, status_callback=None):
     # ── Clean up ────────────────────────────────────────────────────
     context.close()
 
-    # ── Step 12: CA Business Registration Lookup ────────────────────
-    report_status("Looking up California business registration...", 19)
-    try:
-        from ca_lookup import lookup_ca_registration
-        ca_result = lookup_ca_registration(browser, domain)
-        results["ca_registration"] = ca_result
-    except Exception as e:
-        print(f"[!] CA registration lookup failed: {e}")
-        results["ca_registration"] = {"status": "error", "message": str(e)}
-
-    # ── Step 13: Print summary ──────────────────────────────────────
+    # ── Print summary ─────────────────────────────────────────────
     print_summary(results)
-    report_status("Scan complete", 20)
+    report_status("Scan complete", 19)
 
     return results
 

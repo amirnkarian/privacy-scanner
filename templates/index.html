@@ -679,7 +679,6 @@ header .subtitle {
                     <th>Domain</th>
                     <th>Status</th>
                     <th style="text-align:center">TikTok</th>
-                    <th style="text-align:center">CA Registered</th>
                     <th>Categories</th>
                     <th>Actions</th>
                 </tr>
@@ -713,11 +712,6 @@ header .subtitle {
             <div class="card-label">TikTok After Opt-Out</div>
             <div class="card-value" id="val-after">--</div>
             <div class="card-detail" id="detail-after"></div>
-        </div>
-        <div class="card" id="card-ca-reg">
-            <div class="card-label">CA Registration</div>
-            <div class="card-value" id="val-ca-reg">--</div>
-            <div class="card-detail" id="detail-ca-reg"></div>
         </div>
     </div>
 
@@ -1238,28 +1232,10 @@ function addBatchResultRow(url, scanId, result) {
         }
     }
 
-    // CA Registration badge
-    let caRegBadge;
-    const caReg = result.ca_registration;
-    if (caReg && caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() === 'active') {
-        let tip = caReg.entity_name || '';
-        if (caReg.entity_number) tip += ' (#' + caReg.entity_number + ')';
-        if (caReg.entity_status) tip += ' — ' + caReg.entity_status;
-        caRegBadge = '<span class="badge badge-pass" title="' + tip.replace(/"/g, '&quot;') + '">YES</span>';
-    } else if (caReg && caReg.status === 'not_found') {
-        caRegBadge = '<span class="badge badge-fail">NO</span>';
-    } else if (caReg && (caReg.status === 'inconclusive' || caReg.status === 'error' || (caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() !== 'active'))) {
-        let tip = caReg.entity_name ? caReg.entity_name + ' (' + (caReg.entity_status || 'unknown status') + ')' : (caReg.message || 'Lookup inconclusive');
-        caRegBadge = '<span class="badge badge-inconclusive" title="' + tip.replace(/"/g, '&quot;') + '">INCONCLUSIVE</span>';
-    } else {
-        caRegBadge = '<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text-dim)">N/A</span>';
-    }
-
     row.innerHTML =
         '<td class="domain-cell">' + domain + '</td>' +
         '<td>' + statusBadge + '</td>' +
         '<td style="text-align:center; font-weight:600">' + trackerCount + '</td>' +
-        '<td style="text-align:center">' + caRegBadge + '</td>' +
         '<td class="categories-cell">' + categories + '</td>' +
         '<td><div class="actions-cell">' + actions + '</div></td>';
 
@@ -1408,32 +1384,6 @@ function displayResults(result) {
         afterDetail += ' | Other (' + otherAfter.length + '): ' + otherAfter.join(', ');
     }
     document.getElementById('detail-after').textContent = afterDetail;
-
-    // CA Registration card
-    const caReg = result.ca_registration;
-    const valCaReg = document.getElementById('val-ca-reg');
-    const detailCaReg = document.getElementById('detail-ca-reg');
-    if (caReg && caReg.status === 'found') {
-        const isActive = caReg.entity_status && caReg.entity_status.toLowerCase() === 'active';
-        valCaReg.textContent = isActive ? 'Registered' : caReg.entity_status || 'Found';
-        valCaReg.style.color = isActive ? 'var(--success)' : 'var(--warning)';
-        let detail = caReg.entity_name || '';
-        if (caReg.entity_number) detail += ' (#' + caReg.entity_number + ')';
-        if (caReg.entity_type) detail += ' - ' + caReg.entity_type;
-        detailCaReg.textContent = detail;
-    } else if (caReg && caReg.status === 'not_found') {
-        valCaReg.textContent = 'Not Found';
-        valCaReg.style.color = 'var(--danger)';
-        detailCaReg.textContent = 'No CA registration found';
-    } else if (caReg && caReg.status === 'inconclusive') {
-        valCaReg.textContent = 'Inconclusive';
-        valCaReg.style.color = 'var(--warning)';
-        detailCaReg.textContent = caReg.entity_name || 'Manual verification needed';
-    } else {
-        valCaReg.textContent = 'N/A';
-        valCaReg.style.color = 'var(--text-dim)';
-        detailCaReg.textContent = caReg && caReg.message ? caReg.message : 'Lookup unavailable';
-    }
 
     // Tracker table
     const flagged = result.flagged_domains || {};
