@@ -1749,13 +1749,18 @@ def scan_url(browser, url, status_callback=None):
         print("[*] No known tracker domains found in post-opt-out requests.")
         report_status("No tracker domains found after opt-out", 16)
 
-    # Flag as a violation ONLY if opt-out was verified AND trackers still present.
-    # If opt-out was not verified, mark as inconclusive regardless.
+    # Determine verdict:
+    #   - Trackers found after opt-out  → FAIL ("yes")  regardless of verification
+    #   - No trackers after opt-out     → PASS ("no")
+    #   - Couldn't find/click opt-out   → INCONCLUSIVE
+    #
+    # INCONCLUSIVE is reserved for when the scanner couldn't complete the
+    # opt-out process at all (no banner found, nothing clicked).  If the
+    # opt-out was attempted and trackers fire afterward, that's a FAIL.
     if results["trackers_after"]:
-        if results["opt_out_verified"] == "yes":
-            results["still_tracking"] = "yes"
-        else:
-            results["still_tracking"] = "inconclusive"
+        results["still_tracking"] = "yes"
+    elif results["opt_out_clicked"] != "yes":
+        results["still_tracking"] = "inconclusive"
 
     if new_tp_cookie_domains:
         # Check if any new third-party cookie domains match known trackers.
@@ -1763,10 +1768,7 @@ def scan_url(browser, url, status_callback=None):
             d for d in new_tp_cookie_domains if is_tracker_request(d.lstrip("."))
         ]
         if tracker_cookie_domains:
-            if results["opt_out_verified"] == "yes":
-                results["still_tracking"] = "yes"
-            elif results["still_tracking"] != "yes":
-                results["still_tracking"] = "inconclusive"
+            results["still_tracking"] = "yes"
             print(f"\n[!] NEW tracker cookies set after opt-out:")
             for d in tracker_cookie_domains:
                 print(f"      - {d}")

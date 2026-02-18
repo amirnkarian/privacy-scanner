@@ -679,7 +679,7 @@ header .subtitle {
                     <th>Domain</th>
                     <th>Status</th>
                     <th style="text-align:center">Trackers</th>
-                    <th style="text-align:center">CA Reg</th>
+                    <th style="text-align:center">CA Registered</th>
                     <th>Categories</th>
                     <th>Actions</th>
                 </tr>
@@ -1232,11 +1232,15 @@ function addBatchResultRow(url, scanId, result) {
     let caRegBadge;
     const caReg = result.ca_registration;
     if (caReg && caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() === 'active') {
-        caRegBadge = '<span class="badge badge-pass" title="' + (caReg.entity_name || '') + '">YES</span>';
+        let tip = caReg.entity_name || '';
+        if (caReg.entity_number) tip += ' (#' + caReg.entity_number + ')';
+        if (caReg.entity_status) tip += ' — ' + caReg.entity_status;
+        caRegBadge = '<span class="badge badge-pass" title="' + tip.replace(/"/g, '&quot;') + '">YES</span>';
     } else if (caReg && caReg.status === 'not_found') {
         caRegBadge = '<span class="badge badge-fail">NO</span>';
-    } else if (caReg && (caReg.status === 'inconclusive' || (caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() !== 'active'))) {
-        caRegBadge = '<span class="badge badge-inconclusive">CHECK</span>';
+    } else if (caReg && (caReg.status === 'inconclusive' || caReg.status === 'error' || (caReg.status === 'found' && caReg.entity_status && caReg.entity_status.toLowerCase() !== 'active'))) {
+        let tip = caReg.entity_name ? caReg.entity_name + ' (' + (caReg.entity_status || 'unknown status') + ')' : (caReg.message || 'Lookup inconclusive');
+        caRegBadge = '<span class="badge badge-inconclusive" title="' + tip.replace(/"/g, '&quot;') + '">INCONCLUSIVE</span>';
     } else {
         caRegBadge = '<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text-dim)">N/A</span>';
     }
