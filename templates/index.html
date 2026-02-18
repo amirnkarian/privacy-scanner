@@ -1213,19 +1213,19 @@ function addBatchResultRow(url, scanId, result) {
         trackerCount = result.trackers_after ? result.trackers_after.length : 0;
         const cats = getCategoriesForResult(result);
         categories = cats.length > 0 ? cats.join(', ') : '--';
-        actions = '<button class="action-link action-link-evidence" onclick="window.open(\'/api/scan/' + scanId + '/evidence\', \'_blank\')">Evidence</button>' +
-                  '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
+        actions = '<button class="action-link action-link-evidence" onclick="downloadWithRetry(\'/api/scan/' + scanId + '/evidence\', this)">Evidence</button>' +
+                  '<button class="action-link action-link-pdf" onclick="downloadWithRetry(\'/api/scan/' + scanId + '/pdf\', this)">PDF</button>';
     } else if (result.still_tracking === 'inconclusive') {
         statusBadge = '<span class="badge badge-inconclusive">INCONCLUSIVE</span>';
         trackerCount = result.trackers_after ? result.trackers_after.length : '?';
         const cats = getCategoriesForResult(result);
         categories = cats.length > 0 ? cats.join(', ') : 'Opt-out not verified';
-        actions = '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
+        actions = '<button class="action-link action-link-pdf" onclick="downloadWithRetry(\'/api/scan/' + scanId + '/pdf\', this)">PDF</button>';
     } else {
         statusBadge = '<span class="badge badge-pass">PASS</span>';
         trackerCount = '0';
         categories = '--';
-        actions = '<button class="action-link action-link-pdf" onclick="window.open(\'/api/scan/' + scanId + '/pdf\', \'_blank\')">PDF</button>';
+        actions = '<button class="action-link action-link-pdf" onclick="downloadWithRetry(\'/api/scan/' + scanId + '/pdf\', this)">PDF</button>';
     }
 
     // CA Registration badge
@@ -1298,6 +1298,52 @@ function resetToInput() {
         urlInput.focus();
     } else {
         batchTextarea.focus();
+    }
+}
+
+/* ── Download with retry ────────────────────────────────── */
+async function downloadWithRetry(url, btn, maxRetries = 3) {
+    const origText = btn.textContent;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const resp = await fetch(url);
+            if (resp.ok) {
+                const blob = await resp.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                const disposition = resp.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename="?([^"]+)"?/);
+                a.download = match ? match[1] : 'download';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(a.href);
+                btn.textContent = origText;
+                return;
+            }
+            const data = await resp.json().catch(() => ({}));
+            if (data.retry === false || attempt === maxRetries) {
+                btn.textContent = origText;
+                alert('Download failed: ' + (data.error || 'Unknown error'));
+                return;
+            }
+        } catch (e) {
+            if (attempt === maxRetries) {
+                btn.textContent = origText;
+                alert('Download failed: ' + e.message);
+                return;
+            }
+        }
+        btn.textContent = 'Retrying... (' + attempt + '/' + maxRetries + ')';
+        await new Promise(r => setTimeout(r, 3000));
+    }
+}
+
+function downloadAction(url, buttonEl) {
+    if (buttonEl) {
+        downloadWithRetry(url, buttonEl);
+    } else {
+        window.open(url, '_blank');
     }
 }
 
@@ -1420,17 +1466,18 @@ function displayResults(result) {
         screenshotsGrid.classList.add('hidden');
     }
 
-    // PDF button
-    document.getElementById('download-pdf-btn').onclick = () => {
-        window.open('/api/scan/' + currentScanId + '/pdf', '_blank');
+    // PDF button (with retry)
+    const pdfBtn = document.getElementById('download-pdf-btn');
+    pdfBtn.onclick = () => {
+        downloadWithRetry('/api/scan/' + currentScanId + '/pdf', pdfBtn);
     };
 
-    // Evidence package button (for violations and inconclusive)
+    // Evidence package button (with retry)
     const evidenceBtn = document.getElementById('download-evidence-btn');
     if (result.still_tracking === 'yes' || result.still_tracking === 'inconclusive') {
         evidenceBtn.style.display = '';
         evidenceBtn.onclick = () => {
-            window.open('/api/scan/' + currentScanId + '/evidence', '_blank');
+            downloadWithRetry('/api/scan/' + currentScanId + '/evidence', evidenceBtn);
         };
     } else {
         evidenceBtn.style.display = 'none';

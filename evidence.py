@@ -129,6 +129,14 @@ def _sanitize_for_pdf(text):
         "\u201d": '"',    # right double quote
         "\u2026": "...",  # ellipsis
         "\u00a0": " ",    # non-breaking space
+        "\u2192": "->",   # right arrow
+        "\u2190": "<-",   # left arrow
+        "\u2194": "<->",  # left-right arrow
+        "\u2022": "*",    # bullet
+        "\u25cf": "*",    # black circle
+        "\u2713": "[x]",  # checkmark
+        "\u2717": "[ ]",  # ballot x
+        "\u00b7": ".",    # middle dot
     }
     for char, repl in replacements.items():
         text = text.replace(char, repl)
@@ -676,7 +684,9 @@ def generate_demand_letter(result, output_path):
     pdf.set_font("Helvetica", "", 10)
 
     opt_out_verified = result.get("opt_out_verified") == "yes"
-    opt_out_method = result.get("opt_out_method", "the opt-out/reject button")
+    opt_out_method = _sanitize_for_pdf(
+        result.get("opt_out_method", "the opt-out/reject button")
+    )
 
     if opt_out_verified:
         pdf.multi_cell(0, 5, new_x="LMARGIN", new_y="NEXT", text=
@@ -873,7 +883,7 @@ def generate_scan_report(result, output_path):
         pdf.set_text_color(0, 0, 0)
         pdf.ln(4)
         pdf.set_font("Helvetica", "", 11)
-        opt_method = result.get("opt_out_method", "the cookie consent mechanism")
+        opt_method = _sanitize_for_pdf(result.get("opt_out_method", "the cookie consent mechanism"))
         pdf.multi_cell(0, 6, new_x="LMARGIN", new_y="NEXT", text=
             f"The scan detected {len(flagged)} tracker domain(s) that continued "
             f"sending data after the user opted out of tracking via {opt_method}. "

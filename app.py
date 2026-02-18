@@ -11,6 +11,7 @@ Open: http://localhost:5000
 import json
 import os
 import threading
+import traceback
 import uuid
 from datetime import datetime
 from queue import Queue, Empty
@@ -24,6 +25,44 @@ import database
 import scanner
 
 app = Flask(__name__)
+
+# Directory for pre-generated evidence packages.
+EVIDENCE_DIR = os.path.join(os.path.dirname(__file__), "evidence")
+os.makedirs(EVIDENCE_DIR, exist_ok=True)
+
+
+def _sanitize_for_pdf(text):
+    """Replace Unicode characters that Helvetica can't render."""
+    replacements = {
+        "\u2014": "--", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"', "\u2026": "...", "\u00a0": " ",
+        "\u2192": "->", "\u2190": "<-", "\u2194": "<->",
+        "\u2022": "*", "\u25cf": "*", "\u2713": "[x]", "\u2717": "[ ]",
+        "\u00b7": ".",
+    }
+    for char, repl in replacements.items():
+        text = text.replace(char, repl)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _pregenerate_evidence(scan_id, result):
+    """Pre-generate the evidence ZIP in a background thread so it's ready for download."""
+    if result.get("still_tracking") not in ("yes", "inconclusive"):
+        return  # No violations — no evidence to generate.
+
+    def _generate():
+        try:
+            from evidence import generate_evidence_package
+            zip_bytes = generate_evidence_package(result)
+            out_path = os.path.join(EVIDENCE_DIR, f"{scan_id}.zip")
+            with open(out_path, "wb") as f:
+                f.write(zip_bytes)
+            print(f"[*] Evidence pre-generated: {out_path} ({len(zip_bytes)} bytes)")
+        except Exception as e:
+            print(f"[!] Evidence pre-generation failed for {scan_id}: {e}")
+            traceback.print_exc()
+
+    threading.Thread(target=_generate, daemon=True).start()
 
 # ────────────────────────────────────────────────────────────────────
 # In-memory store for active / recent scans.
@@ -92,6 +131,9 @@ def start_scan():
 
             active_scans[scan_id]["result"] = result
             q.put({"event": "complete", "data": result})
+
+            # Pre-generate evidence package in background.
+            _pregenerate_evidence(scan_id, result)
 
         except Exception as e:
             active_scans[scan_id]["error"] = str(e)
@@ -182,14 +224,33 @@ def serve_screenshot(filename):
 def download_pdf(scan_id):
     """Generate and return a PDF privacy compliance report."""
     if scan_id not in active_scans:
-        return jsonify({"error": "Scan not found"}), 404
+        return jsonify({"error": "Scan not found", "retry": False}), 404
 
     scan = active_scans[scan_id]
     if not scan["done"] or not scan["result"]:
-        return jsonify({"error": "Scan not yet complete"}), 404
+        return jsonify({"error": "Scan not yet complete", "retry": True}), 202
 
     result = scan["result"]
 
+    try:
+        pdf_bytes = _generate_pdf_report(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"PDF generation failed: {e}", "retry": False}), 500
+
+    domain = scanner.get_domain(result["url"]).replace(":", "_")
+
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="privacy-report-{domain}.pdf"'
+        },
+    )
+
+
+def _generate_pdf_report(result):
+    """Build the PDF bytes for a scan result. Raises on failure."""
     from fpdf import FPDF
 
     pdf = FPDF()
@@ -233,20 +294,16 @@ def download_pdf(scan_id):
         pdf.set_font("Helvetica", "B", 14)
         pdf.cell(0, 10, "California Business Registration", ln=True)
         pdf.set_font("Helvetica", "", 11)
-        if ca_reg.get("entity_name"):
-            pdf.cell(0, 7, f"Entity Name: {ca_reg['entity_name']}", ln=True)
-        if ca_reg.get("entity_number"):
-            pdf.cell(0, 7, f"Entity Number: {ca_reg['entity_number']}", ln=True)
-        if ca_reg.get("entity_status"):
-            pdf.cell(0, 7, f"Status: {ca_reg['entity_status']}", ln=True)
-        if ca_reg.get("entity_type"):
-            pdf.cell(0, 7, f"Type: {ca_reg['entity_type']}", ln=True)
-        if ca_reg.get("formation_date"):
-            pdf.cell(0, 7, f"Formation Date: {ca_reg['formation_date']}", ln=True)
-        if ca_reg.get("registered_agent"):
-            pdf.cell(0, 7, f"Registered Agent: {ca_reg['registered_agent']}", ln=True)
-        if ca_reg.get("agent_address"):
-            pdf.cell(0, 7, f"Agent Address: {ca_reg['agent_address']}", ln=True)
+        for label, key in [("Entity Name", "entity_name"),
+                           ("Entity Number", "entity_number"),
+                           ("Status", "entity_status"),
+                           ("Type", "entity_type"),
+                           ("Formation Date", "formation_date"),
+                           ("Registered Agent", "registered_agent"),
+                           ("Agent Address", "agent_address")]:
+            val = ca_reg.get(key)
+            if val:
+                pdf.cell(0, 7, _sanitize_for_pdf(f"{label}: {val}"), ln=True)
         pdf.ln(5)
 
     # ── Scan details ───────────────────────────────────────────
@@ -265,7 +322,7 @@ def download_pdf(scan_id):
         pdf.cell(0, 9, "Trackers Before Opt-Out:", ln=True)
         pdf.set_font("Helvetica", "", 10)
         for t in result["trackers_before"]:
-            pdf.cell(0, 6, f"  - {t}", ln=True)
+            pdf.cell(0, 6, _sanitize_for_pdf(f"  - {t}"), ln=True)
         pdf.ln(3)
 
     # ── Flagged domains table ──────────────────────────────────
@@ -287,8 +344,8 @@ def download_pdf(scan_id):
 
         # Table rows
         pdf.set_font("Helvetica", "", 9)
-        for domain, info in sorted(flagged.items()):
-            pdf.cell(85, 7, f"  {domain[:42]}", border=1)
+        for fdomain, info in sorted(flagged.items()):
+            pdf.cell(85, 7, f"  {fdomain[:42]}", border=1)
             pdf.cell(25, 7, str(info["count"]), border=1, align="C")
             pdf.cell(70, 7, f"  {info['matched_rule'][:34]}", border=1)
             pdf.ln()
@@ -297,13 +354,15 @@ def download_pdf(scan_id):
     # ── Notes ──────────────────────────────────────────────────
     notes = result.get("notes", [])
     if notes:
+        # Reset cursor to left margin before multi_cell.
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Helvetica", "B", 12)
         pdf.cell(0, 9, "Notes:", ln=True)
         pdf.set_font("Helvetica", "", 10)
         for note in notes:
-            # Truncate very long notes for PDF readability.
             short = note[:200] + "..." if len(note) > 200 else note
-            pdf.multi_cell(0, 6, f"  - {short}")
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6, _sanitize_for_pdf(f"  - {short}"))
         pdf.ln(3)
 
     # ── Screenshots ────────────────────────────────────────────
@@ -321,39 +380,50 @@ def download_pdf(scan_id):
                 pdf.set_font("Helvetica", "", 11)
                 pdf.cell(0, 10, "(Screenshot could not be embedded)", ln=True)
 
-    # ── Output ─────────────────────────────────────────────────
-    pdf_bytes = pdf.output()
-    domain = scanner.get_domain(result["url"]).replace(":", "_")
-
-    return Response(
-        pdf_bytes,
-        mimetype="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="privacy-report-{domain}.pdf"'
-        },
-    )
+    return bytes(pdf.output())
 
 
 @app.route("/api/scan/<scan_id>/evidence")
 def download_evidence(scan_id):
     """Generate and return a legal evidence package as a ZIP file."""
     if scan_id not in active_scans:
-        return jsonify({"error": "Scan not found"}), 404
+        return jsonify({"error": "Scan not found", "retry": False}), 404
 
     scan = active_scans[scan_id]
     if not scan["done"] or not scan["result"]:
-        return jsonify({"error": "Scan not yet complete"}), 404
+        return jsonify({"error": "Scan not yet complete", "retry": True}), 202
 
     result = scan["result"]
     if result.get("still_tracking") not in ("yes", "inconclusive"):
-        return jsonify({"error": "No violations found — evidence package only available for violations or inconclusive results"}), 400
-
-    from evidence import generate_evidence_package
-    zip_bytes = generate_evidence_package(result)
+        return jsonify({
+            "error": "No violations found -- evidence package only available for violations",
+            "retry": False,
+        }), 400
 
     domain = scanner.get_domain(result["url"]).replace(":", "_")
     date_str = datetime.now().strftime("%Y-%m-%d")
     filename = f"{domain}_privacy_violation_evidence_{date_str}.zip"
+
+    # Check for pre-generated evidence file first.
+    prebuilt_path = os.path.join(EVIDENCE_DIR, f"{scan_id}.zip")
+    if os.path.exists(prebuilt_path) and os.path.getsize(prebuilt_path) > 0:
+        with open(prebuilt_path, "rb") as f:
+            zip_bytes = f.read()
+    else:
+        # Fallback: generate on the fly.
+        try:
+            from evidence import generate_evidence_package
+            zip_bytes = generate_evidence_package(result)
+
+            # Save for future requests.
+            try:
+                with open(prebuilt_path, "wb") as f:
+                    f.write(zip_bytes)
+            except Exception:
+                pass
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({"error": f"Evidence generation failed: {e}", "retry": False}), 500
 
     return Response(
         zip_bytes,
@@ -450,6 +520,9 @@ def start_batch_scan():
 
                         active_batch_scans[batch_id]["results"][url] = result
                         active_batch_scans[batch_id]["scan_ids"][url] = scan_id
+
+                        # Pre-generate evidence package in background.
+                        _pregenerate_evidence(scan_id, result)
 
                         if result.get("still_tracking") == "yes":
                             violations += 1
