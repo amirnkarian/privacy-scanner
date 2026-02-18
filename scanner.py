@@ -284,9 +284,10 @@ def try_click_button(page, button_texts, timeout=3000):
 # COOKIE OPT-OUT: MULTI-STRATEGY SYSTEM
 # ────────────────────────────────────────────────────────────────────
 
-# Selectors for known cookie consent framework banners.
+# Selectors for known cookie consent framework banners/modals.
 _BANNER_SELECTORS = [
     '#onetrust-banner-sdk',
+    '#onetrust-consent-sdk',
     '#CybotCookiebotDialog',
     '.truste-consent-track',
     '#truste-consent-track',
@@ -295,24 +296,107 @@ _BANNER_SELECTORS = [
     '[class*="consent-banner"]',
     '[id*="cookie-banner"]',
     '[id*="consent-banner"]',
+    '[class*="cookie-modal"]',
+    '[class*="consent-modal"]',
+    '[class*="cookie-notice"]',
+    '[class*="consent-notice"]',
+    '.truste_overlay',
+    '.truste_box_overlay',
+    '.truste_cm_outerdiv',
 ]
 
 # Footer link texts for finding privacy/cookie preference links.
 _FOOTER_PRIVACY_TEXTS = [
     "Your Privacy Choices",
-    "Do Not Sell",
-    "Do Not Sell My Personal Information",
-    "Do Not Sell or Share",
-    "Privacy",
-    "Cookie",
     "Cookie Preferences",
     "Cookie Settings",
+    "Cookie Management",
+    "Manage Cookies",
+    "Privacy Settings",
+    "Do Not Sell My Personal Information",
+    "Do Not Sell or Share My Personal Information",
+    "Do Not Sell or Share",
+    "Do Not Sell",
+    "Ad Preferences",
+    "Privacy Center",
+    "Cookie Policy",
+    "Manage Your Cookie Preferences",
+]
+
+# Categories to DISABLE when toggling preferences.
+_DISABLE_CATEGORIES = [
+    "analytics", "advertising", "marketing", "targeting",
+    "personalization", "performance", "social media",
+    "targeted advertising", "functional", "statistics",
+    "preference", "sale of personal data",
+]
+
+# Categories to LEAVE ENABLED (essential/required).
+_KEEP_ENABLED_CATEGORIES = [
+    "essential", "strictly necessary", "required", "necessary",
+]
+
+# Save/confirm button texts for preference panels.
+_SAVE_TEXTS = [
+    "Reject All",
+    "Reject all",
+    "Refuse All",
+    "Refuse all",
+    "Reject Targeting and Marketing",
+    "Confirm My Choices",
+    "Confirm my choices",
+    "Save",
+    "Confirm",
+    "Confirm Choices",
+    "Confirm choices",
+    "Save Preferences",
+    "Save preferences",
+    "Accept Selected",
+    "Accept selected",
+    "Save Settings",
+    "Save settings",
+    "Apply",
+    "Submit",
+    "Save & Close",
+    "Save and close",
 ]
 
 
 def _is_banner_dismissed(page):
     """Check if the cookie consent banner has been dismissed."""
     for selector in _BANNER_SELECTORS:
+        try:
+            el = page.query_selector(selector)
+            if el and el.is_visible():
+                return False
+        except Exception:
+            continue
+    return True
+
+
+# Selectors for preference panels/modals (opened by footer links or settings buttons).
+_PREFERENCE_PANEL_SELECTORS = [
+    '#onetrust-pc-sdk',
+    '.ot-preference-center',
+    '#CybotCookiebotDialogDetail',
+    '.truste_overlay',
+    '.truste_box_overlay',
+    '.truste_cm_outerdiv',
+    'iframe[src*="consent-pref.trustarc"]',
+    '[class*="cookie-settings"]',
+    '[class*="cookie-preferences"]',
+    '[class*="privacy-center"]',
+    '[id*="cookie-settings"]',
+    '[id*="privacy-preferences"]',
+    '[role="dialog"][aria-label*="cookie" i]',
+    '[role="dialog"][aria-label*="privacy" i]',
+    '[role="dialog"][aria-label*="consent" i]',
+]
+
+
+def _is_preference_panel_dismissed(page):
+    """Check if a cookie preference panel/modal has been dismissed."""
+    for selector in _PREFERENCE_PANEL_SELECTORS:
         try:
             el = page.query_selector(selector)
             if el and el.is_visible():
@@ -334,41 +418,164 @@ def _safe_click(page, selector, timeout=3000):
     return False
 
 
-def _try_framework_optout(page):
+def _take_optout_screenshot(page, safe_domain, suffix="optout"):
+    """Take a screenshot during opt-out for verification."""
+    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+    path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_{suffix}.png")
+    try:
+        page.screenshot(path=path, full_page=False)
+        return path
+    except Exception:
+        return None
+
+
+def _scroll_to_bottom(page):
+    """Scroll to the very bottom of the page to reveal lazy-loaded footer content."""
+    try:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1500)
+        # Scroll again in case more content loaded
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+
+def _is_essential_category(text):
+    """Check if a toggle label belongs to an essential/required category."""
+    lower = text.lower().strip()
+    for keep in _KEEP_ENABLED_CATEGORIES:
+        if keep in lower:
+            return True
+    return False
+
+
+def _disable_non_essential_toggles(page):
     """
-    Strategy 1: Framework-specific selectors (OneTrust, CookieBot, TrustArc, Osano).
-    Returns dict with keys: strategy, clicked, element, verified.
+    Find and disable all non-essential cookie toggles in a preference panel.
+    Returns the number of toggles flipped.
     """
-    attempt = {"strategy": "framework_specific", "clicked": False, "element": None}
+    toggles_flipped = 0
+
+    # Strategy A: Find labeled toggle groups and disable non-essential ones.
+    # Many consent managers wrap toggles in containers with category labels.
+    toggle_container_selectors = [
+        # OneTrust
+        '.ot-sdk-row',
+        '.ot-cat-item',
+        # Generic
+        '.cookie-category',
+        '.consent-category',
+        '[class*="preference-group"]',
+        '[class*="cookie-group"]',
+        '[class*="toggle-group"]',
+    ]
+
+    for container_sel in toggle_container_selectors:
+        try:
+            containers = page.locator(container_sel)
+            count = containers.count()
+            for i in range(count):
+                container = containers.nth(i)
+                try:
+                    label_text = container.inner_text(timeout=500)
+                    if _is_essential_category(label_text):
+                        continue
+                    # Look for active toggles inside this container
+                    for toggle_sel in [
+                        'input[type="checkbox"]:checked',
+                        '[aria-checked="true"]',
+                        '.ot-switch input:checked',
+                    ]:
+                        try:
+                            toggle = container.locator(toggle_sel).first
+                            if toggle.is_visible(timeout=300):
+                                toggle.click(timeout=1000)
+                                toggles_flipped += 1
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # Strategy B: If no containers found, try all toggles globally
+    # but skip those near "essential"/"necessary" labels.
+    if toggles_flipped == 0:
+        global_toggle_selectors = [
+            'input[type="checkbox"]:checked',
+            '[aria-checked="true"]',
+            '.ot-switch input:checked',
+            'button[role="switch"][aria-checked="true"]',
+            '.toggle-switch.active',
+            '[class*="toggle"][class*="on"]',
+            '[class*="switch"][class*="active"]',
+        ]
+        for sel in global_toggle_selectors:
+            try:
+                toggles = page.locator(sel)
+                count = toggles.count()
+                for i in range(count):
+                    try:
+                        toggle = toggles.nth(i)
+                        if not toggle.is_visible(timeout=300):
+                            continue
+                        # Check nearby text for essential categories
+                        try:
+                            parent_text = toggle.locator("xpath=ancestor::*[position()<=3]").last.inner_text(timeout=300)
+                            if _is_essential_category(parent_text):
+                                continue
+                        except Exception:
+                            pass
+                        toggle.click(timeout=1000)
+                        toggles_flipped += 1
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+    return toggles_flipped
+
+
+# ── Strategy 1: Popup/Banner Detection ────────────────────────────
+
+def _try_banner_optout(page):
+    """
+    Strategy 1: Find and interact with cookie consent banners/popups.
+    Tries framework-specific selectors first, then generic text buttons,
+    then manage-preferences flow.
+    Returns dict with keys: strategy, clicked, element.
+    """
+    attempt = {"strategy": "banner_popup", "clicked": False, "element": None}
 
     # ── OneTrust ──────────────────────────────────────────────
     try:
         banner = page.query_selector('#onetrust-banner-sdk')
         if banner and banner.is_visible():
-            # Try direct reject button first
             if _safe_click(page, '#onetrust-reject-all-handler'):
                 attempt["clicked"] = True
                 attempt["element"] = "OneTrust: Reject All"
                 return attempt
-
-            # Try opening preference center, then reject-all inside it
             if _safe_click(page, '#onetrust-pc-btn-handler'):
                 page.wait_for_timeout(2000)
-                # Try reject-all in preference center
                 if _safe_click(page, '.ot-pc-refuse-all-handler'):
                     attempt["clicked"] = True
                     attempt["element"] = "OneTrust: Preference Center → Reject All"
                     return attempt
-                # Try save/confirm in preference center (toggles may default to off)
-                clicked_save = try_click_button(page, SAVE_MINIMAL_TEXTS)
-                if clicked_save:
+                # Disable toggles, then save
+                flipped = _disable_non_essential_toggles(page)
+                save_clicked = try_click_button(page, _SAVE_TEXTS)
+                if save_clicked:
                     attempt["clicked"] = True
-                    attempt["element"] = f"OneTrust: Preference Center → {clicked_save}"
+                    attempt["element"] = f"OneTrust: Preference Center → {save_clicked}"
+                    if flipped > 0:
+                        attempt["element"] += f" (disabled {flipped} toggles)"
                     return attempt
-                # Try the save-preference button directly
                 if _safe_click(page, 'button.save-preference-btn-handler'):
                     attempt["clicked"] = True
                     attempt["element"] = "OneTrust: Preference Center → Save Preferences"
+                    if flipped > 0:
+                        attempt["element"] += f" (disabled {flipped} toggles)"
                     return attempt
     except Exception:
         pass
@@ -381,7 +588,6 @@ def _try_framework_optout(page):
                 attempt["clicked"] = True
                 attempt["element"] = "CookieBot: Decline"
                 return attempt
-            # Try customize → then reject/save
             if _safe_click(page, '#CybotCookiebotDialogBodyLevelButtonCustomize'):
                 page.wait_for_timeout(1500)
                 if _safe_click(page, '#CybotCookiebotDialogBodyButtonDecline'):
@@ -402,7 +608,7 @@ def _try_framework_optout(page):
                     return attempt
                 if _safe_click(page, '.truste-consent-button'):
                     page.wait_for_timeout(2000)
-                    clicked_save = try_click_button(page, SAVE_MINIMAL_TEXTS)
+                    clicked_save = try_click_button(page, _SAVE_TEXTS)
                     if clicked_save:
                         attempt["clicked"] = True
                         attempt["element"] = f"TrustArc: Preferences → {clicked_save}"
@@ -421,119 +627,465 @@ def _try_framework_optout(page):
     except Exception:
         pass
 
+    # ── Generic text-based buttons ────────────────────────────
+    clicked = try_click_button(page, PRIMARY_OPTOUT_TEXTS)
+    if clicked:
+        attempt["clicked"] = True
+        attempt["element"] = f"Banner button: {clicked}"
+        return attempt
+
+    # ── Generic manage-preferences flow ───────────────────────
+    manage_clicked = try_click_button(page, MANAGE_PREFS_TEXTS)
+    if manage_clicked:
+        print(f'[*] Clicked preferences button: "{manage_clicked}"')
+        page.wait_for_timeout(2000)
+
+        # Try reject-all first inside the panel
+        reject = try_click_button(page, PRIMARY_OPTOUT_TEXTS)
+        if reject:
+            attempt["clicked"] = True
+            attempt["element"] = f"Banner ({manage_clicked}) → {reject}"
+            return attempt
+
+        # Disable toggles
+        flipped = _disable_non_essential_toggles(page)
+
+        # Save
+        save_clicked = try_click_button(page, _SAVE_TEXTS)
+        if save_clicked:
+            attempt["clicked"] = True
+            attempt["element"] = f"Banner ({manage_clicked}) → {save_clicked}"
+            if flipped > 0:
+                attempt["element"] += f" (disabled {flipped} toggles)"
+            return attempt
+
     return attempt
 
 
-def _try_toggle_optout(page):
-    """
-    Strategy 3: Open manage preferences, disable toggles, save.
-    Returns dict with keys: strategy, clicked, element.
-    """
-    attempt = {"strategy": "manage_prefs_toggles", "clicked": False, "element": None}
+# ── Strategy 2: Footer Privacy Links ─────────────────────────────
 
-    manage_clicked = try_click_button(page, MANAGE_PREFS_TEXTS)
-    if not manage_clicked:
-        return attempt
-
-    print(f'[*] Clicked preferences button: "{manage_clicked}"')
-    page.wait_for_timeout(2000)
-
-    # Try to disable checked toggles inside preference panels.
-    toggle_selectors = [
-        'input[type="checkbox"]:checked',
-        '[aria-checked="true"]',
-        '.ot-switch input:checked',
+def _dismiss_popups(page):
+    """Dismiss common marketing popups/overlays that block footer interactions."""
+    popup_close_selectors = [
+        '#attentive_overlay .attentive-close',
+        '#attentive_overlay [aria-label="Close"]',
+        '#attentive_overlay button',
+        '.attentive-dismiss',
+        '[id*="attentive"] [class*="close"]',
+        '.popup-close',
+        '.modal-close',
+        '[class*="popup"] [class*="close"]',
+        '[class*="overlay"] [class*="close"]',
+        '[class*="newsletter"] [class*="close"]',
+        '[class*="signup"] [class*="close"]',
+        'button[aria-label="Close"]',
+        'button[aria-label="close"]',
+        '[class*="email-popup"] [class*="close"]',
     ]
-    toggles_flipped = 0
-    for sel in toggle_selectors:
+    for sel in popup_close_selectors:
         try:
-            toggles = page.locator(sel)
-            count = toggles.count()
-            for i in range(count):
-                try:
-                    toggle = toggles.nth(i)
-                    if toggle.is_visible(timeout=300):
-                        toggle.click(timeout=1000)
-                        toggles_flipped += 1
-                except Exception:
-                    continue
+            locator = page.locator(sel).first
+            if locator.is_visible(timeout=300):
+                locator.click(timeout=2000)
+                page.wait_for_timeout(500)
+                return True
         except Exception:
             continue
 
-    if toggles_flipped > 0:
-        print(f"[*] Disabled {toggles_flipped} toggle(s) in preferences panel.")
+    # Try removing attentive overlay via JS as a fallback
+    try:
+        page.evaluate("""
+            const overlay = document.getElementById('attentive_overlay');
+            if (overlay) overlay.remove();
+            // Also try removing any fixed-position overlays
+            document.querySelectorAll('[style*="position: fixed"]').forEach(el => {
+                if (el.offsetHeight > 300 && el.offsetWidth > 300) {
+                    const z = parseInt(window.getComputedStyle(el).zIndex) || 0;
+                    if (z > 1000) el.remove();
+                }
+            });
+        """)
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+    return False
 
-    # Now click save/confirm
-    save_clicked = try_click_button(page, SAVE_MINIMAL_TEXTS)
-    if save_clicked:
-        attempt["clicked"] = True
-        attempt["element"] = f"Manage Preferences ({manage_clicked}) → {save_clicked}"
-        if toggles_flipped > 0:
-            attempt["element"] += f" (disabled {toggles_flipped} toggles)"
-    elif toggles_flipped > 0:
-        # Try clicking the save button by selector as a last resort
-        if _safe_click(page, 'button.save-preference-btn-handler'):
-            attempt["clicked"] = True
-            attempt["element"] = f"Manage Preferences ({manage_clicked}) → Save (disabled {toggles_flipped} toggles)"
 
-    return attempt
-
-
-def _try_footer_privacy_link(page):
+def _try_footer_optout(page, original_url):
     """
-    Strategy 4: Look for a privacy/cookie link in the footer and try opt-out there.
+    Strategy 2: Scroll to footer, find privacy/cookie links, click them,
+    and handle whatever opens (modal, preference panel, or new page).
     Returns dict with keys: strategy, clicked, element.
     """
     attempt = {"strategy": "footer_link", "clicked": False, "element": None}
 
+    # Dismiss any marketing popups that may block footer clicks
+    _dismiss_popups(page)
+
+    # Scroll to the very bottom to reveal lazy-loaded footer content.
+    print("[*] Scrolling to bottom of page to find footer links...")
+    _scroll_to_bottom(page)
+
+    # Dismiss popups again after scrolling (some appear on scroll)
+    _dismiss_popups(page)
+
+    # Record the current URL to detect page navigations
+    url_before = page.url
+
     for text in _FOOTER_PRIVACY_TEXTS:
         try:
+            # Search in footer first, then body, then any element
             for selector in [
                 f'footer a:has-text("{text}")',
+                f'footer button:has-text("{text}")',
+                f'footer span:has-text("{text}")',
+                f'footer div:has-text("{text}")',
                 f'a:has-text("{text}")',
+                f'button:has-text("{text}")',
                 f'[role="link"]:has-text("{text}")',
+                f'[role="button"]:has-text("{text}")',
             ]:
-                locator = page.locator(selector).first
-                if locator.is_visible(timeout=500):
-                    locator.click(timeout=3000)
-                    print(f'[*] Clicked footer privacy link: "{text}"')
-                    page.wait_for_timeout(2500)
+                try:
+                    locator = page.locator(selector).first
+                    if not locator.is_visible(timeout=500):
+                        continue
+                except Exception:
+                    continue
 
-                    # Now try framework-specific opt-out on the new modal/page
-                    fw_attempt = _try_framework_optout(page)
-                    if fw_attempt["clicked"]:
-                        attempt["clicked"] = True
-                        attempt["element"] = f"Footer ({text}) → {fw_attempt['element']}"
-                        return attempt
+                # Found a visible link — click it
+                try:
+                    locator.click(timeout=5000)
+                except Exception:
+                    # If regular click fails (e.g. overlay), try force click
+                    try:
+                        locator.click(timeout=3000, force=True)
+                    except Exception:
+                        continue
 
-                    # Try direct text buttons
-                    direct = try_click_button(page, PRIMARY_OPTOUT_TEXTS)
-                    if direct:
-                        attempt["clicked"] = True
-                        attempt["element"] = f"Footer ({text}) → {direct}"
-                        return attempt
+                print(f'[*] Clicked footer privacy link: "{text}"')
+                page.wait_for_timeout(3000)
 
-                    # Try toggle approach
-                    toggle_attempt = _try_toggle_optout(page)
-                    if toggle_attempt["clicked"]:
-                        attempt["clicked"] = True
-                        attempt["element"] = f"Footer ({text}) → {toggle_attempt['element']}"
-                        return attempt
+                # Check if we navigated to a new page (like AG1's privacy center)
+                url_after = page.url
+                navigated_away = url_after != url_before
 
-                    # Tried this link but nothing worked — continue to next
-                    break
+                if navigated_away:
+                    print(f"[*] Navigated to privacy center: {url_after}")
+                    # Wait for the page to load
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                    except PlaywrightTimeout:
+                        pass
+                    page.wait_for_timeout(2000)
+
+                    # On the privacy center page, look for a "Manage Cookie Preferences" link
+                    manage_texts = [
+                        "Manage Your Cookie Preferences",
+                        "Manage Cookie Preferences",
+                        "Cookie Preferences",
+                        "Cookie Settings",
+                        "Manage Cookies",
+                        "Manage Preferences",
+                    ]
+                    for mt in manage_texts:
+                        sub_clicked = try_click_button(page, [mt])
+                        if sub_clicked:
+                            print(f'[*] Clicked: "{sub_clicked}" on privacy center page')
+                            page.wait_for_timeout(3000)
+                            break
+
+                # Now try to interact with whatever appeared (modal, panel, or page)
+                result = _interact_with_preference_panel(page)
+                if result:
+                    attempt["clicked"] = True
+                    attempt["verified"] = True
+                    attempt["element"] = f"Footer ({text}) → {result}"
+                    return attempt
+
+                # If nothing worked, try going back if we navigated
+                if navigated_away:
+                    try:
+                        page.goto(original_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="networkidle")
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+                # This link didn't work — break inner selector loop, try next text
+                break
+        except Exception:
+            continue
+
+    # Also try the CCPA toggle icon (a blue toggle/slider icon)
+    try:
+        for icon_sel in [
+            'a[href*="privacy"]',
+            '[class*="ccpa"]',
+            '[class*="privacy-choices"]',
+            '[id*="ccpa"]',
+            'img[alt*="Privacy"]',
+            'img[alt*="CCPA"]',
+            'img[alt*="privacy choices"]',
+        ]:
+            locator = page.locator(f'footer {icon_sel}').first
+            if locator.is_visible(timeout=500):
+                locator.click(timeout=3000)
+                print(f"[*] Clicked CCPA/privacy icon in footer")
+                page.wait_for_timeout(3000)
+                result = _interact_with_preference_panel(page)
+                if result:
+                    attempt["clicked"] = True
+                    attempt["verified"] = True
+                    attempt["element"] = f"Footer CCPA icon → {result}"
+                    return attempt
+                break
+    except Exception:
+        pass
+
+    return attempt
+
+
+def _try_trustarc_iframe(page):
+    """
+    Handle TrustArc consent managers that use an iframe.
+    Finds the iframe, clicks 'No' on advertising, then 'Save'.
+    Returns a description string if successful, or None.
+    """
+    # Find the TrustArc iframe
+    frame = None
+    try:
+        frame = page.frame(url="*consent-pref.trustarc.com*")
+    except Exception:
+        pass
+
+    if not frame:
+        try:
+            iframe_el = page.query_selector('iframe[title*="TrustArc"]')
+            if not iframe_el:
+                iframe_el = page.query_selector('iframe[src*="trustarc"]')
+            if not iframe_el:
+                iframe_el = page.query_selector('iframe[src*="consent-pref"]')
+            if iframe_el:
+                frame = iframe_el.content_frame()
+        except Exception:
+            pass
+
+    if not frame:
+        return None
+
+    print("[*] Found TrustArc iframe — interacting with consent preferences...")
+
+    toggled = 0
+    try:
+        # Click all "No" buttons that aren't already active (opt out of non-essential)
+        # TrustArc uses spans with class "on" for "No" and "off" for "Yes"
+        # The active one has class "active"
+        no_buttons = frame.locator('span.gwt-InlineHTML.on:not(.active)')
+        count = no_buttons.count()
+        for i in range(count):
+            try:
+                btn = no_buttons.nth(i)
+                if btn.is_visible(timeout=500):
+                    btn.click(timeout=2000)
+                    toggled += 1
+                    page.wait_for_timeout(500)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Click Save
+    try:
+        save_btn = frame.locator('a.submit, button.submit, a:has-text("SAVE"), a:has-text("Save")')
+        if save_btn.first.is_visible(timeout=1000):
+            save_btn.first.click(timeout=3000)
+            page.wait_for_timeout(2000)
+            # Close the TrustArc overlay after saving
+            try:
+                close_btn = page.locator('#trustarc-internal-close-button, .truste-close-button')
+                if close_btn.first.is_visible(timeout=1000):
+                    close_btn.first.click(timeout=2000)
+                    page.wait_for_timeout(1000)
+            except Exception:
+                # Try removing the overlay via JS
+                try:
+                    page.evaluate("""
+                        document.querySelector('.truste_overlay')?.remove();
+                        document.querySelector('.truste_cm_outerdiv')?.remove();
+                        document.querySelector('.truste_box_overlay')?.remove();
+                    """)
+                except Exception:
+                    pass
+            desc = "TrustArc iframe: Save"
+            if toggled > 0:
+                desc = f"TrustArc iframe: toggled {toggled} to No → Save"
+            return desc
+    except Exception:
+        pass
+
+    # If we toggled but couldn't save, still report
+    if toggled > 0:
+        return f"TrustArc iframe: toggled {toggled} to No (save not found)"
+
+    return None
+
+
+def _interact_with_preference_panel(page):
+    """
+    Given that a preference panel/modal/page is now visible,
+    try to opt out by: (1) clicking Reject All, (2) TrustArc iframe,
+    (3) disabling toggles + save.
+    Returns a description string if successful, or None.
+    """
+    # Try framework-specific first
+    # OneTrust preference center
+    if _safe_click(page, '#onetrust-reject-all-handler'):
+        return "OneTrust Reject All"
+    if _safe_click(page, '.ot-pc-refuse-all-handler'):
+        return "OneTrust Preference Center Reject All"
+
+    # CookieBot
+    if _safe_click(page, '#CybotCookiebotDialogBodyButtonDecline'):
+        return "CookieBot Decline"
+
+    # TrustArc — try direct buttons first
+    if _safe_click(page, '.truste-consent-required'):
+        return "TrustArc Required Only"
+
+    # TrustArc — iframe-based consent manager
+    trustarc_result = _try_trustarc_iframe(page)
+    if trustarc_result:
+        return trustarc_result
+
+    # Generic reject/decline buttons
+    reject = try_click_button(page, PRIMARY_OPTOUT_TEXTS)
+    if reject:
+        return reject
+
+    # Try Reject All / Refuse All in save texts
+    for text in ["Reject All", "Reject all", "Refuse All", "Refuse all",
+                 "Reject Targeting and Marketing"]:
+        clicked = try_click_button(page, [text])
+        if clicked:
+            return clicked
+
+    # Disable toggles + save
+    flipped = _disable_non_essential_toggles(page)
+    save_clicked = try_click_button(page, _SAVE_TEXTS)
+    if save_clicked:
+        desc = save_clicked
+        if flipped > 0:
+            desc += f" (disabled {flipped} toggles)"
+        return desc
+
+    # Try save button by selector
+    if _safe_click(page, 'button.save-preference-btn-handler'):
+        desc = "Save Preferences"
+        if flipped > 0:
+            desc += f" (disabled {flipped} toggles)"
+        return desc
+
+    return None
+
+
+# ── Strategy 3: JavaScript Consent API Calls ─────────────────────
+
+def _try_js_consent_api(page):
+    """
+    Strategy 3: Directly trigger consent manager opt-out via JavaScript.
+    Returns dict with keys: strategy, clicked, element.
+    """
+    attempt = {"strategy": "js_consent_api", "clicked": False, "element": None}
+
+    # ── OneTrust: RejectAll() ─────────────────────────────────
+    try:
+        has_onetrust = page.evaluate("typeof OneTrust !== 'undefined'")
+        if has_onetrust:
+            page.evaluate("OneTrust.RejectAll()")
+            page.wait_for_timeout(1500)
+            attempt["clicked"] = True
+            attempt["verified"] = True
+            attempt["element"] = "OneTrust.RejectAll() via JavaScript"
+            return attempt
+    except Exception:
+        pass
+
+    # ── OneTrust: reject button via selector ──────────────────
+    try:
+        if _safe_click(page, '#onetrust-reject-all-handler'):
+            attempt["clicked"] = True
+            attempt["verified"] = True
+            attempt["element"] = "OneTrust: #onetrust-reject-all-handler"
+            return attempt
+    except Exception:
+        pass
+
+    # ── CookieBot: withdraw() ─────────────────────────────────
+    try:
+        has_cookiebot = page.evaluate("typeof Cookiebot !== 'undefined'")
+        if has_cookiebot:
+            page.evaluate("Cookiebot.withdraw()")
+            page.wait_for_timeout(1500)
+            attempt["clicked"] = True
+            attempt["verified"] = True
+            attempt["element"] = "Cookiebot.withdraw() via JavaScript"
+            return attempt
+    except Exception:
+        pass
+
+    # ── CookieBot: decline button via selector ────────────────
+    try:
+        if _safe_click(page, '#CybotCookiebotDialogBodyButtonDecline'):
+            attempt["clicked"] = True
+            attempt["verified"] = True
+            attempt["element"] = "CookieBot: #CybotCookiebotDialogBodyButtonDecline"
+            return attempt
+    except Exception:
+        pass
+
+    # ── TrustArc: required-only button ────────────────────────
+    try:
+        if _safe_click(page, '.truste-consent-required'):
+            attempt["clicked"] = True
+            attempt["verified"] = True
+            attempt["element"] = "TrustArc: .truste-consent-required"
+            return attempt
+    except Exception:
+        pass
+
+    # ── Generic: try triggering via common JS globals ─────────
+    js_attempts = [
+        ("typeof __tcfapi !== 'undefined'",
+         "__tcfapi('setConsent', 2, function(){}, {vendor: {consents: {}}, purpose: {consents: {}}})",
+         "TCF API: setConsent via __tcfapi"),
+    ]
+    for check_js, exec_js, desc in js_attempts:
+        try:
+            has_api = page.evaluate(check_js)
+            if has_api:
+                page.evaluate(exec_js)
+                page.wait_for_timeout(1500)
+                attempt["clicked"] = True
+                attempt["verified"] = True
+                attempt["element"] = desc
+                return attempt
         except Exception:
             continue
 
     return attempt
 
 
-def attempt_cookie_optout(page, domain):
+# ── Main Opt-Out Orchestrator ─────────────────────────────────────
+
+def attempt_cookie_optout(page, domain, safe_domain=None):
     """
     Multi-strategy cookie opt-out system.
 
-    Tries multiple strategies in order and verifies success by checking
-    if the consent banner is dismissed after each attempt.
+    Tries strategies in order:
+      1. Popup/Banner detection (framework-specific + text buttons)
+      2. Footer privacy links (scroll, click, handle navigation)
+      3. JavaScript consent API calls
+
+    Verifies success by checking if the consent banner is dismissed.
 
     Returns a dict with:
       - opt_out_found: "yes" | "no"
@@ -541,6 +1093,7 @@ def attempt_cookie_optout(page, domain):
       - opt_out_verified: "yes" | "no"
       - opt_out_method: description of what worked
       - opt_out_attempts: list of attempt dicts
+      - screenshots: dict of screenshot paths taken during opt-out
     """
     results = {
         "opt_out_found": "no",
@@ -548,29 +1101,22 @@ def attempt_cookie_optout(page, domain):
         "opt_out_verified": "no",
         "opt_out_method": None,
         "opt_out_attempts": [],
+        "screenshots": {},
     }
 
+    # Take a "before opt-out" screenshot
+    if safe_domain:
+        before_ss = _take_optout_screenshot(page, safe_domain, "optout_before")
+        if before_ss:
+            results["screenshots"]["optout_before"] = before_ss
+
+    original_url = page.url
+
     strategies = [
-        ("Framework-Specific", _try_framework_optout),
-        ("Direct Text Buttons", lambda p: {
-            "strategy": "direct_text",
-            "clicked": bool(try_click_button(p, PRIMARY_OPTOUT_TEXTS)),
-            "element": try_click_button(p, PRIMARY_OPTOUT_TEXTS),
-        }),
-        ("Manage Preferences + Toggles", _try_toggle_optout),
-        ("Footer Privacy Link", _try_footer_privacy_link),
+        ("Popup/Banner", lambda p: _try_banner_optout(p)),
+        ("Footer Privacy Links", lambda p: _try_footer_optout(p, original_url)),
+        ("JavaScript Consent API", lambda p: _try_js_consent_api(p)),
     ]
-
-    # For strategy 2, we need a wrapper that doesn't double-click
-    def _direct_text_strategy(p):
-        clicked = try_click_button(p, PRIMARY_OPTOUT_TEXTS)
-        return {
-            "strategy": "direct_text",
-            "clicked": bool(clicked),
-            "element": clicked,
-        }
-
-    strategies[1] = ("Direct Text Buttons", _direct_text_strategy)
 
     for name, strategy_fn in strategies:
         print(f"[*] Trying opt-out strategy: {name}...")
@@ -587,16 +1133,50 @@ def attempt_cookie_optout(page, domain):
             results["opt_out_clicked"] = "yes"
             print(f'[*] Opt-out clicked via {name}: {attempt.get("element")}')
 
-            # Wait for banner to animate away
+            # Take screenshot of preference panel state
+            if safe_domain:
+                panel_ss = _take_optout_screenshot(page, safe_domain, "optout_panel")
+                if panel_ss:
+                    results["screenshots"]["optout_panel"] = panel_ss
+
             page.wait_for_timeout(2000)
 
-            if _is_banner_dismissed(page):
+            # Strategy-specific verification
+            strategy_type = attempt.get("strategy", "")
+            verified = False
+
+            if strategy_type == "footer_link":
+                # Footer strategy: verified if the full interaction completed
+                # (panel opened → reject/toggle → save). _interact_with_preference_panel
+                # only returns success when all steps complete.
+                if attempt.get("verified"):
+                    verified = True
+                    print(f"[*] Footer opt-out verified — full interaction completed!")
+
+            elif strategy_type == "js_consent_api":
+                # JS API: verified if the call executed successfully
+                if attempt.get("verified"):
+                    verified = True
+                    print(f"[*] JS consent API opt-out verified!")
+
+            else:  # banner_popup
+                # Banner strategy: check that banner is no longer visible
+                if _is_banner_dismissed(page):
+                    verified = True
+                    print(f"[*] Banner dismissed — opt-out verified!")
+
+            if verified:
                 results["opt_out_verified"] = "yes"
                 results["opt_out_method"] = attempt.get("element", name)
-                print(f"[*] Banner dismissed — opt-out verified!")
+
+                # Take "after opt-out" screenshot
+                if safe_domain:
+                    after_ss = _take_optout_screenshot(page, safe_domain, "optout_after")
+                    if after_ss:
+                        results["screenshots"]["optout_after"] = after_ss
                 break
             else:
-                print(f"[!] Banner still visible after {name} — trying next strategy...")
+                print(f"[!] Opt-out not verified after {name} — trying next strategy...")
         else:
             print(f"[*] Strategy {name} did not find anything to click.")
 
@@ -617,21 +1197,13 @@ def attempt_cookie_optout(page, domain):
             except Exception:
                 continue
 
+    # Final screenshot regardless of outcome
+    if safe_domain:
+        final_ss = _take_optout_screenshot(page, safe_domain, "optout_final")
+        if final_ss:
+            results["screenshots"]["optout_final"] = final_ss
+
     return results
-
-
-# ────────────────────────────────────────────────────────────────────
-# SCREENSHOT HELPER
-# ────────────────────────────────────────────────────────────────────
-
-def _take_optout_screenshot(page, safe_domain):
-    """Take a screenshot after opt-out attempt for verification."""
-    path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_optout.png")
-    try:
-        page.screenshot(path=path, full_page=False)
-        return path
-    except Exception:
-        return None
 
 
 # Labels we look for when trying to navigate to the shop/products page.
@@ -909,17 +1481,18 @@ def scan_url(browser, url, status_callback=None):
     print("[*] Looking for cookie consent opt-out button...")
     report_status("Looking for cookie consent opt-out button...", 6)
 
-    optout_result = attempt_cookie_optout(page, domain)
+    optout_result = attempt_cookie_optout(page, domain, safe_domain=safe_domain)
     results["opt_out_found"] = optout_result["opt_out_found"]
     results["opt_out_clicked"] = optout_result["opt_out_clicked"]
     results["opt_out_verified"] = optout_result["opt_out_verified"]
     results["opt_out_method"] = optout_result["opt_out_method"]
     results["opt_out_attempts"] = optout_result["opt_out_attempts"]
 
-    # Take screenshot after opt-out attempt for verification.
-    optout_screenshot = _take_optout_screenshot(page, safe_domain)
-    if optout_screenshot:
-        results["screenshot_optout"] = optout_screenshot
+    # Store opt-out screenshots
+    optout_screenshots = optout_result.get("screenshots", {})
+    if optout_screenshots:
+        results["screenshot_optout"] = optout_screenshots.get("optout_after") or optout_screenshots.get("optout_final")
+        results["optout_screenshots"] = optout_screenshots
 
     if results["opt_out_verified"] == "yes":
         report_status(f'Opted out via: {results["opt_out_method"]}', 7)

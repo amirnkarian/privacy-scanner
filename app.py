@@ -214,6 +214,11 @@ def download_pdf(scan_id):
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 13)
         pdf.cell(0, 12, "  VIOLATION: Still tracking after opt-out", ln=True, fill=True)
+    elif result["still_tracking"] == "inconclusive":
+        pdf.set_fill_color(255, 165, 2)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 12, "  INCONCLUSIVE: Opt-out could not be verified", ln=True, fill=True)
     else:
         pdf.set_fill_color(46, 213, 115)
         pdf.set_text_color(255, 255, 255)
@@ -318,8 +323,8 @@ def download_evidence(scan_id):
         return jsonify({"error": "Scan not yet complete"}), 404
 
     result = scan["result"]
-    if result.get("still_tracking") != "yes":
-        return jsonify({"error": "No violations found — evidence package only available for violations"}), 400
+    if result.get("still_tracking") not in ("yes", "inconclusive"):
+        return jsonify({"error": "No violations found — evidence package only available for violations or inconclusive results"}), 400
 
     from evidence import generate_evidence_package
     zip_bytes = generate_evidence_package(result)
