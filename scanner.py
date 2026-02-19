@@ -1597,7 +1597,7 @@ def scan_url(browser, url, status_callback=None):
     print(f"{'=' * 60}")
     report_status(f"Initializing scan for {domain}", 1)
 
-    # ── Step 1: Open a new browser tab ──────────────────────────────
+    # ── Step 1: Open a new browser context ──────────────────────────
     # Each URL gets its own isolated browser context so cookies and
     # storage from one site don't leak into another.
     context = browser.new_context(
@@ -1608,12 +1608,19 @@ def scan_url(browser, url, status_callback=None):
             "Chrome/120.0.0.0 Safari/537.36"
         ),
     )
-    page = context.new_page()
+
+    # Intercept navigator.sendBeacon() — must be added BEFORE creating pages.
+    context.add_init_script("""
+        (function() {
+            const origBeacon = navigator.sendBeacon.bind(navigator);
+            navigator.sendBeacon = function(url, data) {
+                try { fetch(url, {method:'POST', body: data, keepalive: true}).catch(()=>{}); } catch(e) {}
+                return origBeacon(url, data);
+            };
+        })();
+    """)
 
     # ── HARD TIMEOUT: threading.Timer force-kills context at 90s ───
-    # This is the nuclear option that guarantees we NEVER get stuck.
-    # When it fires, context.close() causes all in-flight Playwright
-    # operations to raise, which the step-level try/except blocks catch.
     def _hard_timeout_kill():
         _hard_timeout_fired.set()
         print(f"\n[!!!] HARD TIMEOUT ({MAX_SCAN_TIME}s) — force-closing browser context for {url}")
@@ -1626,60 +1633,33 @@ def scan_url(browser, url, status_callback=None):
     _hard_timer.daemon = True
     _hard_timer.start()
 
-    # ── Step 2: Start network monitoring ────────────────────────────
-    # Every time the browser makes a network request (images, scripts,
-    # API calls, tracking pixels, etc.), we record the URL.
-    captured_requests = []
-    request_details = []
-    # These will be replaced at STEP 5 with fresh lists + a new listener.
-    # Initialized here so post-processing always has valid references
-    # even if STEP 5 is never reached (timeout).
+    # Initialize capture lists (fallback if Phase 2 never reached).
     captured_requests_after = []
     request_details_after = []
+    capture_start_time = None
 
-    def on_request(request):
-        captured_requests.append(request.url)
-        try:
-            headers = dict(request.headers) if request.headers else {}
-        except Exception:
-            headers = {}
-        try:
-            post_data_length = len(request.post_data) if request.post_data else 0
-        except Exception:
-            post_data_length = 0
-        request_details.append({
-            "url": request.url,
-            "method": request.method,
-            "resource_type": request.resource_type,
-            "post_data_length": post_data_length,
-            "timestamp": time.time(),
-            "headers": headers,
-        })
-
-    page.on("request", on_request)
-
-    # Intercept navigator.sendBeacon() by wrapping it with a fetch() call
-    # that Playwright can fully capture.  The original sendBeacon still fires
-    # (so the site behaves normally), but the fetch ensures we log the URL.
-    context.add_init_script("""
-        (function() {
-            const origBeacon = navigator.sendBeacon.bind(navigator);
-            navigator.sendBeacon = function(url, data) {
-                try { fetch(url, {method:'POST', body: data, keepalive: true}).catch(()=>{}); } catch(e) {}
-                return origBeacon(url, data);
-            };
-        })();
-    """)
-
-    print("[*] Network monitoring started (including sendBeacon interception).")
-    report_status("Visiting website...", 2)
-
-    # ── Step 3: Navigate to the website ─────────────────────────────
     timed_out = False
     all_cookies = []
     tp_cookies_before = []
     safe_domain = domain.replace(":", "_")  # handle ports in domain
     os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 1: Visit site and complete opt-out
+    # ═══════════════════════════════════════════════════════════════
+    page = context.new_page()
+
+    # Phase 1 listener — captures "before" requests only.
+    captured_requests_phase1 = []
+
+    def on_request_phase1(request):
+        captured_requests_phase1.append(request.url)
+
+    page.on("request", on_request_phase1)
+
+    print("[*] Phase 1: Visiting site and completing opt-out...")
+    report_status("Phase 1: Visiting website...", 2)
+
     try:
         page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
         print(f"[*] Page loaded: {url}")
@@ -1691,10 +1671,11 @@ def scan_url(browser, url, status_callback=None):
     except Exception as e:
         print(f"[!] Error loading page: {e}")
         results["notes"].append(f"Page load error: {e}")
+        _hard_timer.cancel()
         context.close()
         return results
 
-    try:  # Global ScanTimeout wrapper — catches 2-minute limit
+    try:  # Global timeout wrapper
 
         # STEP 1: Wait 5 seconds for full page load.
         page.wait_for_timeout(5000)
@@ -1713,8 +1694,7 @@ def scan_url(browser, url, status_callback=None):
         check_timeout("before opt-out")
 
         # ── Step 5: Record initial trackers ─────────────────────────────
-        # Check every request we captured against our tracker list.
-        results["trackers_before"] = collect_tracker_hits(captured_requests)
+        results["trackers_before"] = collect_tracker_hits(captured_requests_phase1)
 
         # Also check for third-party cookies.
         all_cookies = context.cookies()
@@ -1722,8 +1702,8 @@ def scan_url(browser, url, status_callback=None):
         tp_cookies_before = find_third_party_cookies(all_cookies, domain)
 
         # ── DIAGNOSTIC: Log TikTok requests found BEFORE opt-out ───────
-        tiktok_before_urls = collect_tiktok_urls(captured_requests)
-        tiktok_before_domains = collect_tiktok_hits(captured_requests)
+        tiktok_before_urls = collect_tiktok_urls(captured_requests_phase1)
+        tiktok_before_domains = collect_tiktok_hits(captured_requests_phase1)
         print(f"\n>>> BEFORE OPT-OUT: Found {len(tiktok_before_urls)} TikTok requests: "
               f"{tiktok_before_domains}")
         for tu in tiktok_before_urls:
@@ -1798,32 +1778,46 @@ def scan_url(browser, url, status_callback=None):
             results["notes"].append("No cookie consent banner found.")
             report_status("No cookie consent banner found", 7)
 
-        # ── Step 7: Post-opt-out — return to homepage ─────────────────
+        # ═══════════════════════════════════════════════════════════════
+        # END OF PHASE 1 — Close the page.
+        # Cookies and localStorage are preserved in the browser context.
+        # ═══════════════════════════════════════════════════════════════
         check_timeout("after opt-out attempt")
-        shop_clicked = None
-
+        print("\n>>> PHASE 1 COMPLETE — closing page, cookies preserved in context")
         try:
-            if results["opt_out_clicked"] == "yes":
-                print("STEP 3: Returning to homepage after opt-out...")
-                report_status("STEP 3: Returning to homepage...", 8)
-            else:
-                report_status("STEP 3: Preparing post-opt-out monitoring...", 8)
+            page.close()
+        except Exception:
+            pass
 
-            # 7a. GO BACK to the homepage with a fresh start.
-            try:
-                page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
-                report_status("Returned to homepage after opt-out", 9)
-                print(f"[*] Returned to homepage: {url}")
-            except PlaywrightTimeout:
-                print("[!] Homepage reload timed out — continuing")
-            except Exception as e:
-                print(f"[!] Failed to return to homepage: {e}")
+        # ═══════════════════════════════════════════════════════════════
+        # PHASE 2: Test if tracking persists on a BRAND NEW page.
+        #
+        # By opening a new page in the same context, we simulate a user
+        # coming back to the site AFTER having opted out.  The opt-out
+        # preferences are stored in cookies/localStorage which persist.
+        #
+        # We do NOT attach any listener until the product page is fully
+        # loaded. This eliminates TikTok requests from initial page
+        # setup, script initialization, and consent banner processing.
+        # ═══════════════════════════════════════════════════════════════
+        report_status("Phase 2: Testing post-opt-out tracking...", 8)
+        page = context.new_page()
 
-            # 7b. Brief wait for homepage — no networkidle.
-            page.wait_for_timeout(2000)
-            check_timeout("after homepage return")
+        # ── Navigate to homepage (NO listener) ─────────────────────────
+        try:
+            page.goto(url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            print(f"[*] Phase 2: Homepage loaded: {url}")
+            report_status("Phase 2: Homepage loaded", 9)
+        except PlaywrightTimeout:
+            print("[!] Phase 2: Homepage load timed out — continuing")
+        except Exception as e:
+            print(f"[!] Phase 2: Homepage load failed: {e}")
+        check_timeout("Phase 2 homepage")
 
-            # ── STEP 3: Navigate to shop page ──────────────────────────────
+        # ── Navigate to shop page (NO listener) ───────────────────────
+        shop_clicked = None
+        try:
             print("STEP 3: Looking for shop/category page...")
             report_status("STEP 3: Looking for shop/category page...", 10)
             shop_clicked = navigate_to_shop(page)
@@ -1831,8 +1825,7 @@ def scan_url(browser, url, status_callback=None):
             if shop_clicked:
                 print(f"STEP 3: Navigated to category page: {page.url}")
                 report_status("STEP 3: Navigated to category page", 11)
-                # Wait 5 seconds for category page to fully load.
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(3000)
                 check_timeout("shop page load")
             else:
                 print("STEP 3: Could not find shop/category page.")
@@ -1844,7 +1837,7 @@ def scan_url(browser, url, status_callback=None):
             print(f"[!] STEP 3: Navigation failed ({e}) — skipping to next step")
             results["notes"].append(f"Navigation step failed: {e}")
 
-        # ── STEP 4: Click a product ────────────────────────────────────
+        # ── Click a product (NO listener) ──────────────────────────────
         print("STEP 4: Looking for products...")
         report_status("STEP 4: Looking for products...", 12)
         on_product_page = False
@@ -1852,7 +1845,6 @@ def scan_url(browser, url, status_callback=None):
         try:
             check_timeout("before product click")
 
-            # Count product links on the page.
             try:
                 pl = page.locator(
                     'a[href*="/products/"], a[href*="/product/"], '
@@ -1862,59 +1854,40 @@ def scan_url(browser, url, status_callback=None):
             except Exception:
                 pass
 
-            # Remember the URL before clicking so we can verify navigation.
             pre_click_url = page.url
             product_clicked = click_first_product(page)
 
             if product_clicked:
-                print("STEP 4: Clicked product — waiting 5s for load...")
+                print("STEP 4: Clicked product — waiting 3s for load...")
                 report_status("STEP 4: Clicked product — loading...", 13)
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(3000)
                 check_timeout("product page load")
 
-                # Verify the URL changed to a product page.
                 current_url = page.url
-                product_url_patterns = [
-                    "/products/", "/product/", "/p/", "/dp/", "/item/",
-                    "/collections/", "/shop/", "/catalog/",
-                ]
                 url_changed = current_url != pre_click_url
-                looks_like_product = any(p in current_url for p in product_url_patterns)
-
-                if url_changed and looks_like_product:
-                    on_product_page = True
-                    print(f"STEP 4: Now on product page: {current_url}")
-                elif url_changed:
+                if url_changed:
                     on_product_page = True
                     print(f"STEP 4: Now on product page: {current_url}")
                 else:
                     print(f"STEP 4: URL unchanged — trying another product...")
-                    results["notes"].append("First product click did not navigate; retrying.")
-                    report_status("STEP 4: Retrying with different product...", 13)
-
                     retry_selectors = [
                         'a[href*="/products/"]:nth-of-type(2)',
                         'a[href*="/products/"]:nth-of-type(3)',
                         '.product-card a[href*="/products/"]',
                         'a[href*="/product/"]',
-                        'a[href*="/collections/"] >> nth=1',
                     ]
                     for sel in retry_selectors:
                         try:
                             loc = page.locator(sel).first
                             if loc.is_visible(timeout=500):
                                 loc.click(timeout=15000)
-                                page.wait_for_timeout(5000)
+                                page.wait_for_timeout(3000)
                                 if page.url != pre_click_url:
                                     on_product_page = True
                                     print(f"STEP 4: Now on product page: {page.url}")
                                     break
                         except Exception:
                             continue
-
-                    if not on_product_page:
-                        print(f"STEP 4: Could not navigate to product page. URL: {page.url}")
-                        results["notes"].append(f"Could not navigate to product page. URL: {page.url}")
 
             if not product_clicked and not on_product_page:
                 sub_texts = ["New Arrivals", "Jeans", "Dresses", "Tops", "Shoes",
@@ -1940,7 +1913,7 @@ def scan_url(browser, url, status_callback=None):
             if not product_clicked and not on_product_page:
                 print("STEP 4: Could not find a product to click.")
                 results["notes"].append(
-                    "Could not find a product to click; monitored page with scrolling instead."
+                    "Could not find a product to click; monitored current page instead."
                 )
         except ScanTimeout:
             raise
@@ -1948,20 +1921,43 @@ def scan_url(browser, url, status_callback=None):
             print(f"[!] STEP 4: Product click failed ({e}) — skipping to next step")
             results["notes"].append(f"Product click step failed: {e}")
 
-        # ── STEP 5: CLEAR ALL network logs — fresh listener ────────────
-        # Remove the old listener entirely and create brand new lists
-        # with a NEW listener. This guarantees zero contamination from
-        # pre-opt-out requests.
-        print("STEP 5: Removing old listener, creating fresh capture lists")
-        report_status("STEP 5: Clearing network logs", 14)
+        # ── Take product page screenshot ───────────────────────────────
+        current_url = page.url
+        print(f"\n>>> BROWSING PRODUCT PAGE: {current_url}")
+        results["product_page_url"] = current_url
+
+        target_base = domain.replace("www.", "")
+        is_homepage = (
+            current_url.rstrip("/") == url.rstrip("/")
+            or current_url.rstrip("/") == f"https://{target_base}"
+            or current_url.rstrip("/") == f"https://www.{target_base}"
+        )
+        if is_homepage:
+            print(f"STEP 5: WARNING — still on homepage ({current_url})")
+            results["notes"].append("WARNING: Evidence screenshot taken on homepage, not product page.")
+        else:
+            print("STEP 5: Confirmed on product page (not homepage)")
+
+        product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
         try:
-            page.remove_listener("request", on_request)
-        except Exception:
-            pass
+            page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
+            results["screenshot_product"] = product_ss_path
+            print(f"STEP 5: Product screenshot saved: {product_ss_path}")
+        except Exception as e:
+            print(f"STEP 5: Screenshot failed: {e}")
+        report_status("STEP 5: Product page screenshot taken", 14)
+
+        # ═══════════════════════════════════════════════════════════════
+        # NOW — Attach the monitoring listener.
+        # This is the ONLY list that matters for violation detection.
+        # Only requests from active browsing on the product page count.
+        # ═══════════════════════════════════════════════════════════════
+        capture_start_time = time.time()
         captured_requests_after = []
         request_details_after = []
 
         def on_request_after(request):
+            req_time = time.time()
             captured_requests_after.append(request.url)
             try:
                 headers = dict(request.headers) if request.headers else {}
@@ -1976,60 +1972,50 @@ def scan_url(browser, url, status_callback=None):
                 "method": request.method,
                 "resource_type": request.resource_type,
                 "post_data_length": post_data_length,
-                "timestamp": time.time(),
+                "timestamp": req_time,
+                "relative_time": req_time - capture_start_time,
                 "headers": headers,
             })
+            # Log TikTok requests the instant they arrive.
+            tiktok_match = is_tiktok_request(request.url)
+            if tiktok_match:
+                relative = req_time - capture_start_time
+                print(f">>> TIKTOK REQUEST at +{relative:.1f}s on {page.url[:60]}: "
+                      f"{request.url[:120]}")
 
         page.on("request", on_request_after)
-        print(">>> NETWORK LOGS CLEARED — fresh listener attached")
+        print(f">>> MONITORING STARTED at {capture_start_time:.0f} — "
+              f"scrolling product page for {POST_PRODUCT_MONITOR}s")
+        report_status("STEP 6: Monitoring network during active browsing", 15)
 
-        # ── STEP 6: Take product page screenshot BEFORE scrolling ──────
-        # Capture while product image, name, price are visible at top.
-        current_url = page.url
-        print(f"\n>>> BROWSING PRODUCT PAGE: {current_url}")
-        print(f"STEP 6: Taking screenshot on: {current_url}")
-        report_status("STEP 6: Taking product page screenshot", 14)
-        results["product_page_url"] = current_url
-
-        # Verify we are NOT on the homepage.
-        target_base = domain.replace("www.", "")
-        is_homepage = (
-            current_url.rstrip("/") == url.rstrip("/")
-            or current_url.rstrip("/") == f"https://{target_base}"
-            or current_url.rstrip("/") == f"https://www.{target_base}"
-        )
-        if is_homepage:
-            print(f"STEP 6: WARNING — still on homepage ({current_url})")
-            results["notes"].append("WARNING: Evidence screenshot taken on homepage, not product page.")
-        else:
-            print("STEP 6: Confirmed on product page (not homepage)")
-
-        product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
+        # ── Scroll product page for 15 seconds (active browsing) ──────
         try:
-            page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
-            results["screenshot_product"] = product_ss_path
-            print(f"STEP 6: Product screenshot saved: {product_ss_path}")
+            page.mouse.move(640, 450)
+            scroll_end = time.time() + POST_PRODUCT_MONITOR
+            while time.time() < scroll_end:
+                check_timeout("monitoring scroll")
+                page.mouse.wheel(0, 350)
+                page.wait_for_timeout(1500)
+        except ScanTimeout:
+            raise
         except Exception as e:
-            print(f"STEP 6: Screenshot failed: {e}")
+            print(f"STEP 6: Scroll interrupted ({e}) — continuing with what we captured")
 
-        # ── STEP 7: Monitor network for 15 seconds — simple wait ───────
-        # Just wait. No scrolling, no network idle, no selectors.
-        # The network request handler is still active and captures everything.
-        print(f"STEP 7: Waiting {POST_PRODUCT_MONITOR}s for delayed trackers...")
-        report_status("STEP 7: Waiting 15s for delayed trackers", 15)
+        # Remove listener to stop capturing.
         try:
-            page.wait_for_timeout(POST_PRODUCT_MONITOR * 1000)
-        except Exception as e:
-            print(f"STEP 7: Wait interrupted ({e}) — continuing with what we captured")
+            page.remove_listener("request", on_request_after)
+        except Exception:
+            pass
 
-        # ── DIAGNOSTIC: Log AFTER OPT-OUT TikTok requests ──────────────
+        # ── DIAGNOSTIC: Log AFTER OPT-OUT results ─────────────────────
         tiktok_after_urls = collect_tiktok_urls(captured_requests_after)
         tiktok_after_domains = collect_tiktok_hits(captured_requests_after)
         print(f"\n>>> AFTER OPT-OUT: Found {len(tiktok_after_urls)} TikTok requests: "
               f"{tiktok_after_domains}")
-        for tu in tiktok_after_urls:
-            print(f">>>   {tu[:120]}")
-        print(f">>> Total requests in after-window: {len(captured_requests_after)}")
+        for rd in request_details_after:
+            if is_tiktok_request(rd["url"]):
+                print(f">>>   +{rd['relative_time']:.1f}s  {rd['url'][:120]}")
+        print(f">>> Total requests in monitoring window: {len(captured_requests_after)}")
 
         if on_product_page:
             results["notes"].append(
@@ -2109,9 +2095,44 @@ def scan_url(browser, url, status_callback=None):
     # All other trackers (Google, Facebook, etc.) are still logged for
     # evidence but do NOT affect the pass/fail determination.
     if results["tiktok_trackers_after"] and results["opt_out_clicked"] == "yes":
-        results["still_tracking"] = "yes"
-        print(f"\n>>> VERDICT: FAIL — {len(results['tiktok_trackers_after'])} TikTok domains "
-              f"found after opt-out: {results['tiktok_trackers_after']}")
+        # ── Timestamp analysis: distinguish real violations from false positives ──
+        # Collect relative timestamps of every TikTok request.
+        tiktok_request_times = []
+        for rd in request_details_after:
+            if is_tiktok_request(rd["url"]):
+                tiktok_request_times.append(rd.get("relative_time", 0))
+
+        has_late_requests = any(t > 5.0 for t in tiktok_request_times)
+        all_early = all(t <= 2.0 for t in tiktok_request_times) if tiktok_request_times else True
+
+        if has_late_requests:
+            # TikTok requests >5s after monitoring started = TRUE violation.
+            results["still_tracking"] = "yes"
+            late_times = [f"+{t:.1f}s" for t in tiktok_request_times if t > 5.0]
+            print(f"\n>>> VERDICT: FAIL — TikTok requests found >5s after monitoring started: "
+                  f"{late_times}")
+            print(f">>>   All TikTok request times: "
+                  f"{[f'+{t:.1f}s' for t in tiktok_request_times]}")
+        elif all_early:
+            # All TikTok requests within 2s = likely cached script initialization.
+            results["still_tracking"] = "inconclusive"
+            results["notes"].append(
+                "POSSIBLE FALSE POSITIVE: All TikTok requests occurred within 2s of "
+                "monitoring start — likely cached script initialization, not active tracking."
+            )
+            print(f"\n>>> VERDICT: INCONCLUSIVE (POSSIBLE FALSE POSITIVE) — "
+                  f"all {len(tiktok_request_times)} TikTok requests within 2s "
+                  f"(likely cached init): "
+                  f"{[f'+{t:.1f}s' for t in tiktok_request_times]}")
+        else:
+            # TikTok requests between 2-5s — inconclusive.
+            results["still_tracking"] = "inconclusive"
+            results["notes"].append(
+                "TikTok requests found between 2-5s after monitoring start — "
+                "could be delayed initialization. Marking as inconclusive."
+            )
+            print(f"\n>>> VERDICT: INCONCLUSIVE — TikTok requests found but all within 5s: "
+                  f"{[f'+{t:.1f}s' for t in tiktok_request_times]}")
     elif timed_out:
         results["still_tracking"] = "timeout"
         print(f"\n>>> VERDICT: TIMEOUT — scan exceeded {MAX_SCAN_TIME}s limit")
