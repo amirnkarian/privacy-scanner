@@ -362,21 +362,41 @@ _BANNER_SELECTORS = [
 ]
 
 # Footer link texts for finding privacy/cookie preference links.
+# Case-insensitive matching — stored in title case but compared lowercase.
 _FOOTER_PRIVACY_TEXTS = [
+    # Privacy choices
+    "Your Privacy Rights and Choices",
+    "Your Privacy Rights",
     "Your Privacy Choices",
+    "Privacy Choices",
+    "Privacy Options",
+    "Your Choices",
+    "Your California Privacy Rights",
+    # Cookie management
     "Cookie Preferences",
     "Cookie Settings",
     "Cookie Management",
     "Manage Cookies",
+    "Cookie Consent",
+    "Manage Your Cookie Preferences",
+    "Cookie Policy",
+    # Privacy settings
     "Privacy Settings",
+    "Privacy Preferences",
+    "Manage Privacy",
+    "Privacy Center",
+    # Do Not Sell variations
     "Do Not Sell My Personal Information",
     "Do Not Sell or Share My Personal Information",
+    "Do Not Sell My Info",
     "Do Not Sell or Share",
     "Do Not Sell",
+    # Advertising
     "Ad Preferences",
-    "Privacy Center",
-    "Cookie Policy",
-    "Manage Your Cookie Preferences",
+    "Advertising Preferences",
+    "AdChoices",
+    # Opt out
+    "Opt Out",
 ]
 
 # Categories to DISABLE when toggling preferences.
@@ -769,8 +789,9 @@ def _dismiss_popups(page):
 
 def _try_footer_optout(page, original_url):
     """
-    Strategy 2: Scroll to footer, find privacy/cookie links, click them,
-    and handle whatever opens (modal, preference panel, or new page).
+    Strategy 2: Find privacy/cookie links anywhere on the page — footer,
+    floating bars, sidebars, legal sections, expandable menus, etc.
+    Click them and handle whatever opens (modal, preference panel, new page).
     Returns dict with keys: strategy, clicked, element.
     """
     attempt = {"strategy": "footer_link", "clicked": False, "element": None}
@@ -779,96 +800,184 @@ def _try_footer_optout(page, original_url):
     _dismiss_popups(page)
 
     # Scroll to the very bottom to reveal lazy-loaded footer content.
-    print("[*] Scrolling to bottom of page to find footer links...")
+    print("[*] Scrolling to bottom of page to find privacy links...")
     _scroll_to_bottom(page)
 
     # Dismiss popups again after scrolling (some appear on scroll)
     _dismiss_popups(page)
 
+    # Try expanding "More", "Legal", "Policies" sections in footer
+    for expand_text in ["More", "Legal", "Policies", "Information", "About",
+                        "Company", "Help", "Customer Service", "Resources"]:
+        try:
+            for sel in [
+                f'footer button:has-text("{expand_text}")',
+                f'footer summary:has-text("{expand_text}")',
+                f'footer [role="button"]:has-text("{expand_text}")',
+                f'footer h3:has-text("{expand_text}")',
+                f'footer h4:has-text("{expand_text}")',
+            ]:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=300):
+                    loc.click(timeout=2000)
+                    page.wait_for_timeout(500)
+                    break
+        except Exception:
+            continue
+
     # Record the current URL to detect page navigations
     url_before = page.url
 
-    for text in _FOOTER_PRIVACY_TEXTS:
+    # Use JavaScript to find ALL matching links/buttons on the page
+    # This avoids Playwright's :has-text() issues with hidden elements
+    print("[*] Searching entire page for privacy/cookie links...")
+    try:
+        matches = page.evaluate("""(searchTexts) => {
+            const results = [];
+            const seen = new Set();
+            // Search all clickable elements
+            const els = document.querySelectorAll('a, button, [role="link"], [role="button"], span[onclick], div[onclick]');
+            for (const el of els) {
+                const text = (el.textContent || '').trim();
+                if (!text || text.length > 200) continue;
+                const textLower = text.toLowerCase();
+                for (const searchText of searchTexts) {
+                    if (textLower.includes(searchText.toLowerCase())) {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        // Check visibility
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        if (rect.width < 5 || rect.height < 5) continue;
+                        const key = searchText + '|' + (el.getAttribute('href') || '') + '|' + text.slice(0, 50);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        results.push({
+                            matchedText: searchText,
+                            elementText: text.slice(0, 100),
+                            tag: el.tagName.toLowerCase(),
+                            href: el.getAttribute('href') || '',
+                            top: rect.top,
+                            inFooter: !!el.closest('footer'),
+                            inFixed: style.position === 'fixed' || style.position === 'sticky',
+                            // Unique selector for re-finding
+                            xpath: (() => {
+                                const path = [];
+                                let node = el;
+                                while (node && node.nodeType === 1) {
+                                    let idx = 1;
+                                    let sib = node.previousElementSibling;
+                                    while (sib) { if (sib.tagName === node.tagName) idx++; sib = sib.previousElementSibling; }
+                                    path.unshift(node.tagName.toLowerCase() + '[' + idx + ']');
+                                    node = node.parentElement;
+                                }
+                                return '/' + path.join('/');
+                            })()
+                        });
+                        break;  // One match per element is enough
+                    }
+                }
+            }
+            // Prioritize: footer links first, then fixed/floating bars, then rest
+            results.sort((a, b) => {
+                if (a.inFooter && !b.inFooter) return -1;
+                if (!a.inFooter && b.inFooter) return 1;
+                if (a.inFixed && !b.inFixed) return -1;
+                if (!a.inFixed && b.inFixed) return 1;
+                return 0;
+            });
+            return results;
+        }""", _FOOTER_PRIVACY_TEXTS)
+        print(f"[*] Found {len(matches)} privacy link candidates")
+        for m in matches[:5]:
+            loc_desc = "footer" if m["inFooter"] else ("floating" if m["inFixed"] else "page")
+            print(f'    [{loc_desc}] "{m["elementText"][:60]}" ({m["tag"]})')
+    except Exception as e:
+        print(f"[!] JS privacy link search failed: {e}")
+        matches = []
+
+    # Try clicking each match
+    for match in matches:
         try:
-            # Search in footer first, then body, then any element
-            for selector in [
-                f'footer a:has-text("{text}")',
-                f'footer button:has-text("{text}")',
-                f'footer span:has-text("{text}")',
-                f'footer div:has-text("{text}")',
-                f'a:has-text("{text}")',
-                f'button:has-text("{text}")',
-                f'[role="link"]:has-text("{text}")',
-                f'[role="button"]:has-text("{text}")',
-            ]:
+            text = match["matchedText"]
+            elem_text = match["elementText"]
+
+            # Re-find the element using XPath
+            xpath = match["xpath"]
+            try:
+                locator = page.locator(f'xpath=/{xpath}')
+                if not locator.is_visible(timeout=500):
+                    # Try text-based fallback
+                    locator = page.locator(f'{match["tag"]}:has-text("{text}")').first
+                    if not locator.is_visible(timeout=500):
+                        continue
+            except Exception:
+                locator = page.locator(f'{match["tag"]}:has-text("{text}")').first
                 try:
-                    locator = page.locator(selector).first
                     if not locator.is_visible(timeout=500):
                         continue
                 except Exception:
                     continue
 
-                # Found a visible link — click it
+            # Click it
+            try:
+                locator.click(timeout=5000)
+            except Exception:
                 try:
-                    locator.click(timeout=5000)
+                    locator.click(timeout=3000, force=True)
                 except Exception:
-                    # If regular click fails (e.g. overlay), try force click
-                    try:
-                        locator.click(timeout=3000, force=True)
-                    except Exception:
-                        continue
+                    continue
 
-                print(f'[*] Clicked footer privacy link: "{text}"')
+            loc_desc = "footer" if match["inFooter"] else ("floating bar" if match["inFixed"] else "page")
+            print(f'[*] Clicked privacy link in {loc_desc}: "{text}"')
+            page.wait_for_timeout(3000)
+
+            # Check if we navigated to a new page
+            url_after = page.url
+            navigated_away = url_after != url_before
+
+            if navigated_away:
+                print(f"[*] Navigated to privacy page: {url_after}")
                 page.wait_for_timeout(3000)
 
-                # Check if we navigated to a new page (like AG1's privacy center)
-                url_after = page.url
-                navigated_away = url_after != url_before
+                # On the privacy page, look for manage/settings buttons
+                manage_texts = [
+                    "Manage Your Cookie Preferences",
+                    "Manage Cookie Preferences",
+                    "Cookie Preferences",
+                    "Cookie Settings",
+                    "Manage Cookies",
+                    "Manage Preferences",
+                    "Manage Privacy Settings",
+                    "Cookie Consent Settings",
+                ]
+                for mt in manage_texts:
+                    sub_clicked = try_click_button(page, [mt])
+                    if sub_clicked:
+                        print(f'[*] Clicked: "{sub_clicked}" on privacy page')
+                        page.wait_for_timeout(3000)
+                        break
 
-                if navigated_away:
-                    print(f"[*] Navigated to privacy center: {url_after}")
-                    # Wait for the page to load (fixed timeout, no networkidle)
-                    page.wait_for_timeout(3000)
+            # Try to interact with whatever appeared (modal, panel, or page)
+            result = _interact_with_preference_panel(page)
+            if result:
+                page.wait_for_timeout(2000)
+                panel_gone = _is_preference_panel_dismissed(page)
+                attempt["clicked"] = True
+                attempt["verified"] = True
+                attempt["element"] = f"Footer ({text}) → {result}"
+                if panel_gone:
+                    attempt["element"] += " [panel dismissed]"
+                return attempt
 
-                    # On the privacy center page, look for a "Manage Cookie Preferences" link
-                    manage_texts = [
-                        "Manage Your Cookie Preferences",
-                        "Manage Cookie Preferences",
-                        "Cookie Preferences",
-                        "Cookie Settings",
-                        "Manage Cookies",
-                        "Manage Preferences",
-                    ]
-                    for mt in manage_texts:
-                        sub_clicked = try_click_button(page, [mt])
-                        if sub_clicked:
-                            print(f'[*] Clicked: "{sub_clicked}" on privacy center page')
-                            page.wait_for_timeout(3000)
-                            break
-
-                # Now try to interact with whatever appeared (modal, panel, or page)
-                result = _interact_with_preference_panel(page)
-                if result:
+            # If nothing worked, go back if we navigated
+            if navigated_away:
+                try:
+                    page.goto(original_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
                     page.wait_for_timeout(2000)
-                    # Verify: preference panel should now be dismissed.
-                    panel_gone = _is_preference_panel_dismissed(page)
-                    attempt["clicked"] = True
-                    attempt["verified"] = True
-                    attempt["element"] = f"Footer ({text}) → {result}"
-                    if panel_gone:
-                        attempt["element"] += " [panel dismissed]"
-                    return attempt
+                    _scroll_to_bottom(page)
+                except Exception:
+                    pass
 
-                # If nothing worked, try going back if we navigated
-                if navigated_away:
-                    try:
-                        page.goto(original_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
-                        page.wait_for_timeout(2000)
-                    except Exception:
-                        pass
-
-                # This link didn't work — break inner selector loop, try next text
-                break
         except Exception:
             continue
 
@@ -878,23 +987,34 @@ def _try_footer_optout(page, original_url):
             'a[href*="privacy"]',
             '[class*="ccpa"]',
             '[class*="privacy-choices"]',
+            '[class*="privacychoices"]',
             '[id*="ccpa"]',
+            '[id*="privacy"]',
             'img[alt*="Privacy"]',
             'img[alt*="CCPA"]',
             'img[alt*="privacy choices"]',
+            'img[alt*="Your Privacy Choices"]',
+            'a[href*="optout"]',
+            'a[href*="opt-out"]',
         ]:
-            locator = page.locator(f'footer {icon_sel}').first
-            if locator.is_visible(timeout=500):
-                locator.click(timeout=3000)
-                print(f"[*] Clicked CCPA/privacy icon in footer")
-                page.wait_for_timeout(3000)
-                result = _interact_with_preference_panel(page)
-                if result:
-                    attempt["clicked"] = True
-                    attempt["verified"] = True
-                    attempt["element"] = f"Footer CCPA icon → {result}"
-                    return attempt
-                break
+            # Search in footer first, then anywhere on page
+            for scope in ['footer', '']:
+                full_sel = f'{scope} {icon_sel}'.strip() if scope else icon_sel
+                try:
+                    locator = page.locator(full_sel).first
+                    if locator.is_visible(timeout=500):
+                        locator.click(timeout=3000)
+                        print(f"[*] Clicked CCPA/privacy icon: {full_sel}")
+                        page.wait_for_timeout(3000)
+                        result = _interact_with_preference_panel(page)
+                        if result:
+                            attempt["clicked"] = True
+                            attempt["verified"] = True
+                            attempt["element"] = f"CCPA icon ({full_sel}) → {result}"
+                            return attempt
+                        break
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -1293,6 +1413,17 @@ SHOP_LINK_TEXTS = [
     "What's New",
     "Sale",
     "Featured",
+    # Large retailers / department stores
+    "Shop by Category",
+    "Furniture",
+    "Home Decor",
+    "Outdoor",
+    "Living Room",
+    "Bedroom",
+    "Kitchen",
+    "Rugs",
+    "Lighting",
+    "Bath",
 ]
 
 # Common shop/collection URL path patterns to try as fallback.
@@ -1309,6 +1440,9 @@ SHOP_URL_PATTERNS = [
     "/new-arrivals",
     "/clothing",
     "/sale",
+    "/furniture",
+    "/shop/all",
+    "/c/all",
 ]
 
 
@@ -1318,8 +1452,9 @@ def navigate_to_shop(page):
 
     Strategy:
       1. Look for visible shop links in the main nav/header.
-      2. If not found, try opening a hamburger/mobile menu first.
-      3. If still not found, try navigating directly to common URL patterns.
+      2. Hover over top-level nav items to reveal dropdown menus, click subcategories.
+      3. If not found, try opening a hamburger/mobile menu first.
+      4. If still not found, try navigating directly to common URL patterns.
 
     Returns the link text or URL pattern that was used, or None.
     """
@@ -1344,7 +1479,66 @@ def navigate_to_shop(page):
         except Exception:
             continue
 
-    # 2. Try opening a hamburger / mobile menu and look again.
+    # 2. Hover over top-level nav items to trigger dropdown menus,
+    #    then look for subcategory links in the revealed dropdown.
+    print("[*] Trying hover-triggered nav dropdowns...")
+    try:
+        top_nav_items = page.evaluate("""() => {
+            const items = [];
+            const navLinks = document.querySelectorAll('nav a, header nav a, [role="navigation"] a');
+            for (const a of navLinks) {
+                const rect = a.getBoundingClientRect();
+                const style = window.getComputedStyle(a);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                if (rect.width < 20 || rect.height < 10) continue;
+                if (rect.top > 100) continue;  // Only top-level nav
+                const text = (a.textContent || '').trim();
+                if (text && text.length < 30) {
+                    items.push({text: text, x: rect.x + rect.width/2, y: rect.y + rect.height/2});
+                }
+            }
+            return items.slice(0, 8);
+        }""")
+        for item in top_nav_items:
+            try:
+                # Hover to trigger dropdown
+                page.mouse.move(item["x"], item["y"])
+                page.wait_for_timeout(1000)
+                # Look for newly visible subcategory links
+                sub_link = page.evaluate("""() => {
+                    const links = document.querySelectorAll('a[href]');
+                    for (const a of links) {
+                        const href = (a.getAttribute('href') || '').toLowerCase();
+                        const text = (a.textContent || '').trim().toLowerCase();
+                        if (!href || href === '/' || href === '#') continue;
+                        const rect = a.getBoundingClientRect();
+                        const style = window.getComputedStyle(a);
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        if (rect.width < 10 || rect.height < 10) continue;
+                        // Look for category/product links in dropdown
+                        const patterns = ['/collections/', '/products', '/shop/', '/c/', '/category/'];
+                        if (patterns.some(p => href.includes(p))) {
+                            return {href: a.getAttribute('href'), text: text.slice(0, 50)};
+                        }
+                    }
+                    return null;
+                }""")
+                if sub_link:
+                    full_url = sub_link["href"]
+                    if not full_url.startswith("http"):
+                        parsed = urlparse(page.url)
+                        full_url = f"{parsed.scheme}://{parsed.netloc}{full_url}"
+                    page.goto(full_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+                    page.wait_for_timeout(2000)
+                    if page.url != pre_nav_url:
+                        print(f"[*] Navigated via hover dropdown: {item['text']} → {sub_link['text']}")
+                        return f"Hover: {item['text']} → {sub_link['text']}"
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 3. Try opening a hamburger / mobile menu and look again.
     hamburger_selectors = [
         'button[aria-label*="menu" i]',
         'button[aria-label*="Menu" i]',
@@ -1381,9 +1575,7 @@ def navigate_to_shop(page):
             except Exception:
                 continue
 
-    # 3. Fallback: try navigating directly to common URL patterns.
-    base_url = page.url.split("?")[0].split("#")[0].rstrip("/")
-    # Get the origin (scheme + host).
+    # 4. Fallback: try navigating directly to common URL patterns.
     parsed = urlparse(page.url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -1528,20 +1720,49 @@ def click_product_and_verify(page, timeout_checker=None):
     print("STEP 4 ATTEMPT 2: CSS product selectors → direct navigation...")
     _check_timeout()
     product_selectors = [
+        # Shopify / generic product URLs
         'a[href*="/products/"]',
         'a[href*="/product/"]',
+        'a[href*="/dp/"]',
+        'a[href*="/item/"]',
+        'a[href*="/p/"]',
+        # Product card class patterns
         '.product-card a',
         '.product-item a',
-        '.grid-item a',
-        '[data-product] a',
-        '.collection-product a',
         '.product-tile a',
         '.product-grid-item a',
-        '.grid__item a[href*="/products/"]',
-        '[class*="product"] a[href]',
-        'article a[href]',
-        '.card a[href]',
+        '.collection-product a',
+        # Grid layouts
+        '.grid-item a',
+        '.grid__item a',
+        # Data attribute patterns
+        '[data-product] a',
+        '[data-product-id] a',
+        '[data-product-card] a',
         '[data-testid*="product"] a',
+        '[data-automation*="product"] a',
+        # Article-based product cards
+        'article a[href]',
+        'article[class*="product"] a',
+        # Class wildcard patterns
+        '[class*="product"] a[href]',
+        '[class*="ProductCard"] a',
+        '[class*="product-card"] a',
+        '[class*="productCard"] a',
+        # Card layouts
+        '.card a[href]',
+        '[class*="card"] a[href*="/product"]',
+        # Wayfair / large retailer patterns
+        '[class*="BrowseCard"] a',
+        '[class*="browse-card"] a',
+        '[class*="CategoryCard"] a',
+        '[class*="item-card"] a',
+        '[class*="ItemCard"] a',
+        # Homepage featured products
+        '[class*="featured"] a[href]',
+        '[class*="promoted"] a[href]',
+        '[class*="hero"] a[href*="/product"]',
+        '[class*="hero"] a[href*="/shop"]',
     ]
 
     tried_hrefs = set()
