@@ -153,8 +153,26 @@ def start_scan():
 
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
-                result = scanner.scan_url(browser, url, status_callback=status_callback)
-                browser.close()
+
+                # Thread-based timeout: force-close browser after MAX_SCAN_TIME
+                def _kill_browser():
+                    print(f"\n[!!!] TIMEOUT ({scanner.MAX_SCAN_TIME}s) — force-closing browser for {url}")
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+
+                timer = threading.Timer(scanner.MAX_SCAN_TIME, _kill_browser)
+                timer.daemon = True
+                timer.start()
+                try:
+                    result = scanner.scan_url(browser, url, status_callback=status_callback)
+                finally:
+                    timer.cancel()
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
 
             active_scans[scan_id]["result"] = result
             q.put({"event": "complete", "data": result})
@@ -584,10 +602,49 @@ def start_batch_scan():
                             },
                         })
 
-                    try:
-                        result = scanner.scan_url(browser, url, status_callback=status_callback)
+                    # Run scan_url in a sub-thread with a hard timeout.
+                    # If scan_url hangs, the timer kills the browser context.
+                    scan_result_holder = [None]
+                    scan_error_holder = [None]
 
-                        # Store in active_scans so existing evidence/PDF routes work
+                    def _run_single_scan(_browser=browser, _url=url, _cb=status_callback):
+                        try:
+                            scan_result_holder[0] = scanner.scan_url(_browser, _url, status_callback=_cb)
+                        except Exception as _e:
+                            scan_error_holder[0] = _e
+
+                    scan_thread = threading.Thread(target=_run_single_scan, daemon=True)
+                    scan_thread.start()
+                    scan_thread.join(timeout=scanner.MAX_SCAN_TIME)
+
+                    if scan_thread.is_alive():
+                        # Thread is still running — scan is stuck. Force-close all contexts.
+                        print(f"\n[!!!] TIMEOUT ({scanner.MAX_SCAN_TIME}s) — force-killing scan for {url}")
+                        try:
+                            for ctx in browser.contexts:
+                                ctx.close()
+                        except Exception:
+                            pass
+                        result = {
+                            "url": url,
+                            "still_tracking": "timeout",
+                            "tiktok_trackers_after": [],
+                            "error": f"Scan timed out after {scanner.MAX_SCAN_TIME}s",
+                        }
+                        database.save_scan_result(
+                            url=url,
+                            evidence_notes=f"Scan timed out after {scanner.MAX_SCAN_TIME}s",
+                        )
+                    elif scan_error_holder[0]:
+                        result = {
+                            "url": url,
+                            "still_tracking": "error",
+                            "error": str(scan_error_holder[0]),
+                        }
+                    else:
+                        result = scan_result_holder[0]
+
+                    if result and result.get("still_tracking") != "error":
                         active_scans[scan_id] = {
                             "queue": Queue(),
                             "result": result,
@@ -609,28 +666,14 @@ def start_batch_scan():
                         else:
                             clean += 1
 
-                        q.put({
-                            "event": "domain_complete",
-                            "data": {
-                                "url": url,
-                                "scan_id": scan_id,
-                                "result": result,
-                            },
-                        })
-
-                    except Exception as e:
-                        q.put({
-                            "event": "domain_complete",
-                            "data": {
-                                "url": url,
-                                "scan_id": None,
-                                "result": {
-                                    "url": url,
-                                    "still_tracking": "error",
-                                    "error": str(e),
-                                },
-                            },
-                        })
+                    q.put({
+                        "event": "domain_complete",
+                        "data": {
+                            "url": url,
+                            "scan_id": scan_id if result and result.get("still_tracking") != "error" else None,
+                            "result": result or {"url": url, "still_tracking": "error", "error": "Unknown"},
+                        },
+                    })
 
                 browser.close()
 

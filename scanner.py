@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -40,6 +41,10 @@ MAX_SCAN_TIME = 90  # 90 seconds hard cap
 
 # How long (seconds) to scroll/monitor after clicking a product.
 POST_PRODUCT_MONITOR = 15
+
+
+class ScanTimeout(Exception):
+    """Raised when a site scan exceeds MAX_SCAN_TIME."""
 
 # ────────────────────────────────────────────────────────────────────
 # KNOWN TRACKER DOMAINS
@@ -1600,7 +1605,7 @@ def navigate_to_shop(page):
     return None
 
 
-def navigate_to_product(page, timeout_checker=None):
+def navigate_to_product(page):
     """
     Navigate to a product page. No clicking, no visibility checks.
     Just find product URLs and goto them directly.
@@ -1669,8 +1674,6 @@ def navigate_to_product(page, timeout_checker=None):
                 target = base_url + "/" + target
             print(f"  Navigating to product: {target[:100]}")
             try:
-                if timeout_checker:
-                    timeout_checker("navigate to product")
                 page.goto(target, timeout=15000, wait_until="domcontentloaded")
                 page.wait_for_timeout(3000)
                 print(f"  PRODUCT PAGE REACHED: {page.url}")
@@ -1714,8 +1717,6 @@ def navigate_to_product(page, timeout_checker=None):
         full_url = base_url + path
         print(f"  Trying shop page: {full_url}")
         try:
-            if timeout_checker:
-                timeout_checker("navigate to shop page")
             resp = page.goto(full_url, timeout=15000, wait_until="domcontentloaded")
             if not resp or resp.status != 200:
                 continue
@@ -1819,21 +1820,6 @@ def scan_url(browser, url, status_callback=None):
 
     scan_start_time = time.time()
 
-    class ScanTimeout(Exception):
-        """Raised when the global scan time limit is exceeded."""
-
-    # Hard timeout flag — set by the threading.Timer when it fires.
-    _hard_timeout_fired = threading.Event()
-
-    def check_timeout(label=""):
-        """Raise ScanTimeout if the 90-second global limit is exceeded."""
-        elapsed = time.time() - scan_start_time
-        if _hard_timeout_fired.is_set() or elapsed >= MAX_SCAN_TIME:
-            raise ScanTimeout(
-                f"Global scan timeout ({MAX_SCAN_TIME}s) exceeded at: {label} "
-                f"(elapsed: {elapsed:.0f}s)"
-            )
-
     def report_status(message, step):
         """Send a status update via the callback, if one was provided."""
         elapsed = time.time() - scan_start_time
@@ -1874,18 +1860,7 @@ def scan_url(browser, url, status_callback=None):
         })();
     """)
 
-    # ── HARD TIMEOUT: threading.Timer force-kills context at 90s ───
-    def _hard_timeout_kill():
-        _hard_timeout_fired.set()
-        print(f"\n[!!!] HARD TIMEOUT ({MAX_SCAN_TIME}s) — force-closing browser context for {url}")
-        try:
-            context.close()
-        except Exception:
-            pass
-
-    _hard_timer = threading.Timer(MAX_SCAN_TIME, _hard_timeout_kill)
-    _hard_timer.daemon = True
-    _hard_timer.start()
+    # No internal timeout — enforced by signal.SIGALRM at the caller level.
 
     # Initialize capture lists (fallback if Phase 2 never reached).
     captured_requests_after = []
@@ -1925,7 +1900,6 @@ def scan_url(browser, url, status_callback=None):
     except Exception as e:
         print(f"[!] Error loading page: {e}")
         results["notes"].append(f"Page load error: {e}")
-        _hard_timer.cancel()
         context.close()
         return results
 
@@ -1933,7 +1907,7 @@ def scan_url(browser, url, status_callback=None):
 
         # STEP 1: Wait 5 seconds for full page load.
         page.wait_for_timeout(5000)
-        check_timeout("after page load")
+
 
         # ── Step 4: Take "before" screenshot ────────────────────────────
         before_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_before.png")
@@ -1945,7 +1919,7 @@ def scan_url(browser, url, status_callback=None):
         except Exception as e:
             print(f"[!] Screenshot failed: {e}")
 
-        check_timeout("before opt-out")
+
 
         # ── Step 5: Record initial trackers ─────────────────────────────
         results["trackers_before"] = collect_tracker_hits(captured_requests_phase1)
@@ -1986,7 +1960,7 @@ def scan_url(browser, url, status_callback=None):
         report_status("STEP 2: Looking for opt-out mechanism...", 6)
 
         try:
-            check_timeout("before opt-out attempt")
+
             optout_result = attempt_cookie_optout(page, domain, safe_domain=safe_domain)
             results["opt_out_found"] = optout_result["opt_out_found"]
             results["opt_out_clicked"] = optout_result["opt_out_clicked"]
@@ -2036,7 +2010,7 @@ def scan_url(browser, url, status_callback=None):
         # END OF PHASE 1 — Close the page.
         # Cookies and localStorage are preserved in the browser context.
         # ═══════════════════════════════════════════════════════════════
-        check_timeout("after opt-out attempt")
+
         print("\n>>> PHASE 1 COMPLETE — closing page, cookies preserved in context")
         try:
             page.close()
@@ -2067,7 +2041,7 @@ def scan_url(browser, url, status_callback=None):
             print("[!] Phase 2: Homepage load timed out — continuing")
         except Exception as e:
             print(f"[!] Phase 2: Homepage load failed: {e}")
-        check_timeout("Phase 2 homepage")
+
 
         # ── Navigate to shop page (NO listener) ───────────────────────
         shop_clicked = None
@@ -2080,7 +2054,7 @@ def scan_url(browser, url, status_callback=None):
                 print(f"STEP 3: Navigated to category page: {page.url}")
                 report_status("STEP 3: Navigated to category page", 11)
                 page.wait_for_timeout(3000)
-                check_timeout("shop page load")
+
             else:
                 print("STEP 3: Could not find shop/category page.")
                 report_status("STEP 3: No shop page found — using current page", 11)
@@ -2097,11 +2071,10 @@ def scan_url(browser, url, status_callback=None):
         on_product_page = False
 
         try:
-            check_timeout("before product click")
             report_status("STEP 4: Clicking product...", 13)
 
             on_product_page, product_url = navigate_to_product(
-                page, timeout_checker=check_timeout
+                page
             )
 
             if on_product_page:
@@ -2186,7 +2159,7 @@ def scan_url(browser, url, status_callback=None):
             page.mouse.move(640, 450)
             scroll_end = time.time() + POST_PRODUCT_MONITOR
             while time.time() < scroll_end:
-                check_timeout("monitoring scroll")
+
                 page.mouse.wheel(0, 350)
                 page.wait_for_timeout(1500)
         except ScanTimeout:
@@ -2435,11 +2408,10 @@ def scan_url(browser, url, status_callback=None):
     results["request_details"] = list(request_details_after)
 
     # ── Clean up ────────────────────────────────────────────────────
-    _hard_timer.cancel()  # Disarm the hard timeout if scan finished in time.
     try:
         context.close()
     except Exception:
-        pass  # Context may already be closed after hard timeout
+        pass
 
     # ── Print summary ─────────────────────────────────────────────
     print_summary(results)
@@ -2566,17 +2538,38 @@ def main():
 
         all_results = []
 
+        # Signal-based timeout handler — fires SIGALRM after MAX_SCAN_TIME seconds.
+        # This interrupts ANY blocking call (page.goto, wait_for_timeout, click, etc.)
+        # and raises ScanTimeout, which cannot be ignored.
+        def _alarm_handler(signum, frame):
+            raise ScanTimeout(f"SIGALRM: scan exceeded {MAX_SCAN_TIME}s limit")
+
+        original_handler = signal.getsignal(signal.SIGALRM)
+
         for i, url in enumerate(urls, start=1):
             print(f"\n[{i}/{len(urls)}] Starting scan...")
+
+            # Arm the 90-second timeout bomb before each site
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(MAX_SCAN_TIME)
 
             try:
                 result = scan_url(browser, url)
                 all_results.append(result)
+            except ScanTimeout as e:
+                print(f"\n[!!!] TIMEOUT for {url}: {e}")
+                print(f"[*] Skipping to next URL...\n")
+                all_results.append({
+                    "url": url,
+                    "error": str(e),
+                    "still_tracking": "timeout",
+                    "tiktok_trackers_after": [],
+                })
+                database.save_scan_result(
+                    url=url,
+                    evidence_notes=f"Scan timed out after {MAX_SCAN_TIME}s",
+                )
             except Exception as e:
-                # ── Error handling ──────────────────────────────────
-                # If anything goes wrong with one site, log it and
-                # move on.  One bad site should never stop the whole
-                # scan.
                 print(f"\n[!!!] SCAN FAILED for {url}: {e}")
                 print("[*] Moving on to next URL...\n")
                 all_results.append({
@@ -2585,11 +2578,14 @@ def main():
                     "still_tracking": "unknown",
                     "tiktok_trackers_after": [],
                 })
-                # Save the error to the database too.
                 database.save_scan_result(
                     url=url,
                     evidence_notes=f"Scan failed with error: {e}",
                 )
+            finally:
+                signal.alarm(0)  # Disarm the alarm after each site
+
+        signal.signal(signal.SIGALRM, original_handler)
 
         browser.close()
 
