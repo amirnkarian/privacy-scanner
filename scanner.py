@@ -1402,7 +1402,6 @@ SHOP_LINK_TEXTS = [
     "new arrivals",
     "Shop",
     "Catalog",
-    "Store",
     "Browse",
     # Category/department pages (fashion/apparel sites)
     "Women",
@@ -1433,15 +1432,14 @@ SHOP_URL_PATTERNS = [
     "/products",
     "/shop",
     "/shop-all",
+    "/shop/all",
     "/catalog",
-    "/store",
     "/women",
     "/men",
     "/new-arrivals",
     "/clothing",
     "/sale",
     "/furniture",
-    "/shop/all",
     "/c/all",
 ]
 
@@ -1458,6 +1456,15 @@ def navigate_to_shop(page):
 
     Returns the link text or URL pattern that was used, or None.
     """
+    # URLs that look like store locators / non-shopping pages
+    _BAD_PATHS = ["/stores", "/store-locator", "/find-a-store", "/locations",
+                  "/about", "/contact", "/careers", "/help", "/faq",
+                  "/privacy", "/terms", "/legal"]
+
+    def _is_bad_landing(url):
+        path = urlparse(url).path.lower().rstrip("/")
+        return any(path == bp or path.startswith(bp + "/") for bp in _BAD_PATHS)
+
     # 1. Look for visible shop links in the main navigation.
     #    After clicking, verify the URL actually changed (not just a dropdown).
     pre_nav_url = page.url
@@ -1473,9 +1480,9 @@ def navigate_to_shop(page):
                 if locator.is_visible(timeout=500):
                     locator.click(timeout=5000)
                     page.wait_for_timeout(2000)
-                    if page.url != pre_nav_url:
+                    if page.url != pre_nav_url and not _is_bad_landing(page.url):
                         return text
-                    # URL didn't change — click opened a dropdown, try next
+                    # URL didn't change or bad landing — try next
         except Exception:
             continue
 
@@ -1530,7 +1537,7 @@ def navigate_to_shop(page):
                         full_url = f"{parsed.scheme}://{parsed.netloc}{full_url}"
                     page.goto(full_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
                     page.wait_for_timeout(2000)
-                    if page.url != pre_nav_url:
+                    if page.url != pre_nav_url and not _is_bad_landing(page.url):
                         print(f"[*] Navigated via hover dropdown: {item['text']} → {sub_link['text']}")
                         return f"Hover: {item['text']} → {sub_link['text']}"
             except Exception:
@@ -1570,7 +1577,7 @@ def navigate_to_shop(page):
                 if locator.is_visible(timeout=500):
                     locator.click(timeout=5000)
                     page.wait_for_timeout(2000)
-                    if page.url != pre_nav_url:
+                    if page.url != pre_nav_url and not _is_bad_landing(page.url):
                         return text
             except Exception:
                 continue
@@ -1610,16 +1617,45 @@ def click_product_and_verify(page, timeout_checker=None):
 
     page_origin = urlparse(page.url)
     base_url = f"{page_origin.scheme}://{page_origin.hostname}"
+    # The target site's hostname (strip www. for comparison)
+    _target_host = (page_origin.hostname or "").lower().replace("www.", "")
+
+    def _is_same_site(url):
+        """Check if a URL belongs to the same site we're scanning."""
+        try:
+            host = (urlparse(url).hostname or "").lower().replace("www.", "")
+            return host == _target_host or host.endswith("." + _target_host)
+        except Exception:
+            return False
 
     def _is_product_url(url):
-        """Does this URL have a product slug? e.g. /products/foo-bar"""
-        path = urlparse(url).path.lower()
+        """Does this URL have a product slug on the SAME domain?"""
+        if not _is_same_site(url):
+            return False
+        parsed_url = urlparse(url)
+        path = parsed_url.path.lower()
+        query = (parsed_url.query or "").lower()
+        # Standard product path patterns (must have slug after)
         for pat in ["/products/", "/product/", "/p/", "/dp/", "/item/"]:
             if pat in path:
                 after = path.split(pat, 1)[1].strip("/")
-                if after and "/" not in after[:40]:  # has a slug, not just another path
+                if after and "/" not in after[:40]:
                     return True
+        # Gap/Old Navy style: /browse/product.do?pid=...
+        if "/browse/product" in path:
+            return True
+        # Query-parameter based product pages
+        if any(p in query for p in ["pid=", "product_id=", "productid=", "skuid="]):
+            return True
         return False
+
+    def _is_external_href(href):
+        """Check if an href points to a different domain."""
+        if href.startswith("http"):
+            return not _is_same_site(href)
+        if href.startswith("//"):
+            return not _is_same_site("https:" + href)
+        return False  # relative URLs are same-site
 
     def _resolve_href(href):
         """Turn a relative or absolute href into a full URL."""
@@ -1633,6 +1669,10 @@ def click_product_and_verify(page, timeout_checker=None):
 
     def _goto_and_check(description, href):
         """Navigate directly via page.goto(), check if it's a product page."""
+        # Skip external links entirely
+        if _is_external_href(href):
+            print(f"  PRODUCT NAV: Skipping external link: {href[:80]}")
+            return False
         full_url = _resolve_href(href)
         print(f"  PRODUCT NAV: Trying {description}: {full_url[:80]}...")
         try:
@@ -1704,12 +1744,12 @@ def click_product_and_verify(page, timeout_checker=None):
         )]
         other_hrefs = [c for c in result if c not in product_hrefs]
 
-        for cand in product_hrefs[:3]:
+        for cand in product_hrefs[:2]:
             _check_timeout()
             if _goto_and_check(f"image-link (product href)", cand["href"]):
                 return True, page.url
 
-        for cand in other_hrefs[:3]:
+        for cand in other_hrefs[:2]:
             _check_timeout()
             if _goto_and_check(f"image-link (other href)", cand["href"]):
                 return True, page.url
@@ -1766,7 +1806,12 @@ def click_product_and_verify(page, timeout_checker=None):
     ]
 
     tried_hrefs = set()
+    attempt2_navs = 0
+    MAX_ATTEMPT2_NAVS = 5  # Cap total navigations in attempt 2
     for sel in product_selectors:
+        if attempt2_navs >= MAX_ATTEMPT2_NAVS:
+            print(f"  ATTEMPT 2: Hit nav limit ({MAX_ATTEMPT2_NAVS}), moving on")
+            break
         _check_timeout()
         try:
             # Get all hrefs matching this selector via JS (avoids visibility issues)
@@ -1780,15 +1825,18 @@ def click_product_and_verify(page, timeout_checker=None):
                         hrefs.add(href);
                     }}
                 }}
-                return Array.from(hrefs).slice(0, 5);
+                return Array.from(hrefs).slice(0, 3);
             }}""")
             if not hrefs:
                 continue
             print(f"  ATTEMPT 2: '{sel}' → {len(hrefs)} unique hrefs")
             for href in hrefs:
+                if attempt2_navs >= MAX_ATTEMPT2_NAVS:
+                    break
                 if href in tried_hrefs:
                     continue
                 tried_hrefs.add(href)
+                attempt2_navs += 1
                 _check_timeout()
                 if _goto_and_check(f"CSS '{sel}'", href):
                     return True, page.url
@@ -1824,7 +1872,7 @@ def click_product_and_verify(page, timeout_checker=None):
         for i, href in enumerate(candidates[:5]):
             print(f"    [{i}] {href[:80]}")
 
-        for href in candidates[:5]:
+        for href in candidates[:3]:
             if href in tried_hrefs:
                 continue
             tried_hrefs.add(href)
@@ -1850,13 +1898,20 @@ def click_product_and_verify(page, timeout_checker=None):
 
             # Find product links on this page using the visible-image-links JS
             candidates = page.evaluate(VISIBLE_IMAGE_LINKS_JS)
-            # Also get any /products/ hrefs from the page
+            # Also get product-like hrefs from the page
             product_hrefs = page.evaluate("""() => {
-                const links = document.querySelectorAll('a[href*="/products/"]');
+                const sels = [
+                    'a[href*="/products/"]', 'a[href*="/product/"]',
+                    'a[href*="/product.do"]', 'a[href*="/browse/product"]',
+                    'a[href*="/dp/"]', 'a[href*="/item/"]',
+                    'a[href*="pid="]', 'a[href*="/p/"]',
+                ];
                 const hrefs = new Set();
-                for (const a of links) {
-                    const href = a.getAttribute('href');
-                    if (href) hrefs.add(href);
+                for (const sel of sels) {
+                    for (const a of document.querySelectorAll(sel)) {
+                        const href = a.getAttribute('href');
+                        if (href) hrefs.add(href);
+                    }
                 }
                 return Array.from(hrefs).slice(0, 10);
             }""")
