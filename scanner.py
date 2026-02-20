@@ -13,9 +13,9 @@ Usage:
 
 import argparse
 import json
+import multiprocessing
 import os
 import re
-import signal
 import sys
 import threading
 import time
@@ -1860,7 +1860,7 @@ def scan_url(browser, url, status_callback=None):
         })();
     """)
 
-    # No internal timeout — enforced by signal.SIGALRM at the caller level.
+    # No internal timeout — enforced by multiprocessing.Process at the caller level.
 
     # Initialize capture lists (fallback if Phase 2 never reached).
     captured_requests_after = []
@@ -2486,6 +2486,24 @@ def normalize_url(url):
 # ENTRY POINT
 # ────────────────────────────────────────────────────────────────────
 
+def _scan_in_process(url, result_queue):
+    """Entry point for each scan subprocess. Creates its own browser."""
+    try:
+        database.init_db()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            result = scan_url(browser, url)
+            browser.close()
+        result_queue.put(result)
+    except Exception as e:
+        result_queue.put({
+            "url": url,
+            "error": str(e),
+            "still_tracking": "unknown",
+            "tiktok_trackers_after": [],
+        })
+
+
 def main():
     # ── Parse command-line arguments ────────────────────────────────
     parser = argparse.ArgumentParser(
@@ -2530,64 +2548,58 @@ def main():
     # ── Initialise the database ─────────────────────────────────────
     database.init_db()
 
-    # ── Launch the browser ──────────────────────────────────────────
-    # We use Playwright's sync API with headless Chromium.
-    with sync_playwright() as pw:
-        print("[*] Launching headless Chromium browser...")
-        browser = pw.chromium.launch(headless=True)
+    # ── Scan each URL in a separate process ──────────────────────────
+    # Each URL gets its own process with its own browser. If a scan
+    # hangs, process.kill() sends SIGKILL which cannot be caught —
+    # kills the process, Playwright, and Chromium instantly.
+    all_results = []
 
-        all_results = []
+    for i, url in enumerate(urls, start=1):
+        print(f"\n[{i}/{len(urls)}] Starting scan...")
 
-        # Signal-based timeout handler — fires SIGALRM after MAX_SCAN_TIME seconds.
-        # This interrupts ANY blocking call (page.goto, wait_for_timeout, click, etc.)
-        # and raises ScanTimeout, which cannot be ignored.
-        def _alarm_handler(signum, frame):
-            raise ScanTimeout(f"SIGALRM: scan exceeded {MAX_SCAN_TIME}s limit")
+        result_queue = multiprocessing.Queue()
+        scan_process = multiprocessing.Process(
+            target=_scan_in_process,
+            args=(url, result_queue),
+        )
+        scan_process.start()
+        scan_process.join(timeout=MAX_SCAN_TIME)
 
-        original_handler = signal.getsignal(signal.SIGALRM)
-
-        for i, url in enumerate(urls, start=1):
-            print(f"\n[{i}/{len(urls)}] Starting scan...")
-
-            # Arm the 90-second timeout bomb before each site
-            signal.signal(signal.SIGALRM, _alarm_handler)
-            signal.alarm(MAX_SCAN_TIME)
-
+        if scan_process.is_alive():
+            # Process is still running after 90s — kill it
+            print(f"\n[!!!] TIMEOUT ({MAX_SCAN_TIME}s) for {url} — killing scan process")
+            scan_process.kill()
+            scan_process.join()  # Reap the zombie process
+            result = {
+                "url": url,
+                "still_tracking": "timeout",
+                "tiktok_trackers_after": [],
+                "trackers_after": [],
+                "trackers_before": [],
+                "opt_out_found": "unknown",
+                "opt_out_clicked": "unknown",
+            }
             try:
-                result = scan_url(browser, url)
-                all_results.append(result)
-            except ScanTimeout as e:
-                print(f"\n[!!!] TIMEOUT for {url}: {e}")
-                print(f"[*] Skipping to next URL...\n")
-                all_results.append({
-                    "url": url,
-                    "error": str(e),
-                    "still_tracking": "timeout",
-                    "tiktok_trackers_after": [],
-                })
                 database.save_scan_result(
                     url=url,
                     evidence_notes=f"Scan timed out after {MAX_SCAN_TIME}s",
                 )
-            except Exception as e:
-                print(f"\n[!!!] SCAN FAILED for {url}: {e}")
-                print("[*] Moving on to next URL...\n")
-                all_results.append({
+            except Exception:
+                pass
+            print(f"[*] Skipping to next URL...\n")
+        else:
+            # Process finished — get the result
+            try:
+                result = result_queue.get(timeout=5)
+            except Exception:
+                result = {
                     "url": url,
-                    "error": str(e),
                     "still_tracking": "unknown",
                     "tiktok_trackers_after": [],
-                })
-                database.save_scan_result(
-                    url=url,
-                    evidence_notes=f"Scan failed with error: {e}",
-                )
-            finally:
-                signal.alarm(0)  # Disarm the alarm after each site
+                    "error": "Scan process ended without returning results",
+                }
 
-        signal.signal(signal.SIGALRM, original_handler)
-
-        browser.close()
+        all_results.append(result)
 
     # ── Final report ────────────────────────────────────────────────
     print(f"\n{'=' * 60}")
