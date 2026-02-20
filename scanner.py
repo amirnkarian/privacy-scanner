@@ -1610,39 +1610,17 @@ def navigate_to_product(page, timeout_checker=None):
     page_origin = urlparse(page.url)
     base_url = f"{page_origin.scheme}://{page_origin.hostname}"
 
-    # Step 1: Get to a collection/shop page
-    shop_paths = ["/collections/all", "/collections", "/products", "/shop", "/shop-all"]
-    landed_on_shop = False
-    for path in shop_paths:
-        full_url = base_url + path
-        print(f"  Trying shop page: {full_url}")
-        try:
-            if timeout_checker:
-                timeout_checker("navigate to shop page")
-            resp = page.goto(full_url, timeout=15000, wait_until="domcontentloaded")
-            if resp and resp.status == 200:
-                print(f"  Landed on shop page: {page.url}")
-                landed_on_shop = True
-                break
-        except Exception as e:
-            print(f"  {path} failed: {e}")
-            continue
-
-    if not landed_on_shop:
-        print("  Could not reach any shop/collection page")
-        return False, None
-
-    page.wait_for_timeout(5000)
-
-    # Step 2: Extract product URLs from querySelectorAll
-    product_urls = page.evaluate("""() => {
-        // Collect from multiple selector patterns
+    EXTRACT_PRODUCT_URLS_JS = """() => {
         const selectors = [
             'a[href*="/products/"]',
             'a[href*="/product/"]',
+            'a[href*="/product.do"]',
             'a[href*="/browse/product"]',
             'a[href*="/dp/"]',
             'a[href*="/item/"]',
+            'a[href*="/p/"]',
+            'a[href*="pid="]',
+            'a[href*="product_id="]',
         ];
         const hrefs = new Set();
         for (const sel of selectors) {
@@ -1651,53 +1629,105 @@ def navigate_to_product(page, timeout_checker=None):
                 if (href && href !== '/' && href !== '#') hrefs.add(href);
             }
         }
-        // Also check for query-param product pages (Gap style: ?pid=)
-        for (const a of document.querySelectorAll('a[href*="pid="]')) {
-            const href = a.href || a.getAttribute('href');
-            if (href) hrefs.add(href);
-        }
         return [...hrefs];
-    }""")
-    print(f"  querySelectorAll found {len(product_urls)} product URLs")
-    for i, url in enumerate(product_urls[:5]):
-        print(f"    [{i}] {url[:100]}")
+    }"""
 
-    # Step 3: If no results from querySelectorAll, try regex on raw HTML
-    if not product_urls:
-        print("  No product URLs from selectors — trying regex on raw HTML...")
-        html = page.evaluate("() => document.documentElement.innerHTML")
-        product_urls = list(set(re.findall(
+    def _extract_from_html(html):
+        """Regex fallback: extract product URLs from raw HTML source."""
+        urls = list(set(re.findall(
             r'href=["\']([^"\']*?/products?/[a-zA-Z0-9][a-zA-Z0-9\-_]*)',
             html
         )))
-        # Also find Gap-style /browse/product URLs
-        product_urls += list(set(re.findall(
+        urls += list(set(re.findall(
             r'href=["\']([^"\']*?/browse/product[^"\']*)',
             html
         )))
-        print(f"  Regex found {len(product_urls)} product URLs in raw HTML")
+        urls += list(set(re.findall(
+            r'href=["\']([^"\']*?[?&]pid=[^"\']*)',
+            html
+        )))
+        return urls
+
+    def _try_navigate_to_product(product_urls):
+        """Try navigating to the first product URL. Returns (success, url)."""
+        for target in product_urls[:3]:
+            if target.startswith("/"):
+                target = base_url + target
+            elif not target.startswith("http"):
+                target = base_url + "/" + target
+            print(f"  Navigating to product: {target[:100]}")
+            try:
+                if timeout_checker:
+                    timeout_checker("navigate to product")
+                page.goto(target, timeout=15000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+                print(f"  PRODUCT PAGE REACHED: {page.url}")
+                return True, page.url
+            except Exception as e:
+                print(f"  Navigation failed: {e}")
+                continue
+        return False, None
+
+    # Step 1: Try the CURRENT page first (STEP 3 already navigated to a shop page)
+    print(f"  Checking current page for product URLs: {page.url[:80]}")
+    product_urls = page.evaluate(EXTRACT_PRODUCT_URLS_JS)
+    print(f"  querySelectorAll found {len(product_urls)} product URLs on current page")
+    for i, url in enumerate(product_urls[:5]):
+        print(f"    [{i}] {url[:100]}")
+
+    if product_urls:
+        success, url = _try_navigate_to_product(product_urls)
+        if success:
+            return True, url
+
+    # Step 1b: Try regex on current page HTML
+    if not product_urls:
+        print("  No product URLs from selectors — trying regex on current page HTML...")
+        html = page.evaluate("() => document.documentElement.innerHTML")
+        product_urls = _extract_from_html(html)
+        print(f"  Regex found {len(product_urls)} product URLs")
         for i, url in enumerate(product_urls[:5]):
             print(f"    [{i}] {url[:100]}")
+        if product_urls:
+            success, url = _try_navigate_to_product(product_urls)
+            if success:
+                return True, url
 
-    # Step 4: Navigate directly to first product URL
-    if product_urls:
-        target = product_urls[0]
-        # Resolve relative URLs
-        if target.startswith("/"):
-            target = base_url + target
-        elif not target.startswith("http"):
-            target = base_url + "/" + target
-        print(f"  Navigating to product: {target[:100]}")
+    # Step 2: Try common shop/collection pages as fallback
+    shop_paths = ["/collections/all", "/collections", "/products", "/shop", "/shop-all",
+                  "/shop/all", "/browse", "/catalog"]
+    for path in shop_paths:
+        full_url = base_url + path
+        print(f"  Trying shop page: {full_url}")
         try:
             if timeout_checker:
-                timeout_checker("navigate to product")
-            page.goto(target, timeout=15000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            print(f"  PRODUCT PAGE REACHED: {page.url}")
-            return True, page.url
+                timeout_checker("navigate to shop page")
+            resp = page.goto(full_url, timeout=15000, wait_until="domcontentloaded")
+            if not resp or resp.status != 200:
+                continue
+            print(f"  Landed on shop page: {page.url}")
+            page.wait_for_timeout(5000)
+
+            # Extract product URLs from this page
+            product_urls = page.evaluate(EXTRACT_PRODUCT_URLS_JS)
+            print(f"  querySelectorAll found {len(product_urls)} product URLs")
+            for i, url in enumerate(product_urls[:5]):
+                print(f"    [{i}] {url[:100]}")
+
+            if not product_urls:
+                html = page.evaluate("() => document.documentElement.innerHTML")
+                product_urls = _extract_from_html(html)
+                print(f"  Regex found {len(product_urls)} product URLs")
+                for i, url in enumerate(product_urls[:5]):
+                    print(f"    [{i}] {url[:100]}")
+
+            if product_urls:
+                success, url = _try_navigate_to_product(product_urls)
+                if success:
+                    return True, url
         except Exception as e:
-            print(f"  Navigation to product failed: {e}")
-            return False, None
+            print(f"  {path} failed: {e}")
+            continue
 
     print("  No product URLs found anywhere.")
     return False, None
