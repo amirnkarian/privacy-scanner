@@ -9,8 +9,10 @@ Open: http://localhost:5000
 """
 
 import json
+import multiprocessing
 import os
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -23,6 +25,42 @@ from playwright.sync_api import sync_playwright
 
 import database
 import scanner
+
+MAX_SCAN_TIME = 90  # Hard kill after 90 seconds — same as CLI
+
+
+def _scan_worker(url, mp_result_queue, mp_status_queue):
+    """
+    Runs in a SEPARATE PROCESS. Launches its own browser, runs the scan,
+    sends status updates and the final result via multiprocessing queues.
+    If this process hangs, the parent kills it with SIGKILL.
+    """
+    try:
+        database.init_db()
+
+        def status_callback(message, step, total_steps, elapsed=0):
+            try:
+                mp_status_queue.put({
+                    "message": message,
+                    "step": step,
+                    "total_steps": total_steps,
+                    "elapsed": round(elapsed, 1),
+                }, block=False)
+            except Exception:
+                pass  # Don't let queue errors kill the scan
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            result = scanner.scan_url(browser, url, status_callback=status_callback)
+            browser.close()
+        mp_result_queue.put(result)
+    except Exception as e:
+        mp_result_queue.put({
+            "url": url,
+            "error": str(e),
+            "still_tracking": "unknown",
+            "tiktok_trackers_after": [],
+        })
 
 app = Flask(__name__)
 
@@ -136,25 +174,61 @@ def start_scan():
     }
 
     def run_scan():
-        """Background thread: launches Playwright and runs the scan."""
+        """Background thread: runs scan in a SEPARATE PROCESS with hard kill timeout."""
         try:
-            database.init_db()
+            mp_result_queue = multiprocessing.Queue()
+            mp_status_queue = multiprocessing.Queue()
 
-            def status_callback(message, step, total_steps, elapsed=0):
-                q.put({
-                    "event": "status",
-                    "data": {
-                        "message": message,
-                        "step": step,
-                        "total_steps": total_steps,
-                        "elapsed": round(elapsed, 1),
-                    },
-                })
+            proc = multiprocessing.Process(
+                target=_scan_worker,
+                args=(url, mp_result_queue, mp_status_queue),
+            )
+            proc.start()
+            start_time = time.time()
 
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                result = scanner.scan_url(browser, url, status_callback=status_callback)
-                browser.close()
+            # Relay status updates from the subprocess to the SSE queue
+            while proc.is_alive():
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > MAX_SCAN_TIME:
+                    proc.kill()
+                    proc.join()
+                    q.put({"event": "scan_error", "data": {
+                        "message": f"Scan timed out after {MAX_SCAN_TIME}s — killed"
+                    }})
+                    active_scans[scan_id]["error"] = f"Timeout after {MAX_SCAN_TIME}s"
+                    return
+
+                # Drain status messages
+                while not mp_status_queue.empty():
+                    try:
+                        status = mp_status_queue.get_nowait()
+                        q.put({"event": "status", "data": status})
+                    except Exception:
+                        break
+
+                time.sleep(0.2)
+
+            proc.join()
+
+            # Drain any remaining status messages
+            while not mp_status_queue.empty():
+                try:
+                    status = mp_status_queue.get_nowait()
+                    q.put({"event": "status", "data": status})
+                except Exception:
+                    break
+
+            # Get the result
+            try:
+                result = mp_result_queue.get(timeout=5)
+            except Exception:
+                result = {
+                    "url": url,
+                    "still_tracking": "unknown",
+                    "tiktok_trackers_after": [],
+                    "error": "Scan process ended without returning results",
+                }
 
             active_scans[scan_id]["result"] = result
             q.put({"event": "complete", "data": result})
@@ -546,93 +620,125 @@ def start_batch_scan():
         clean = 0
         try:
             database.init_db()
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
-                for i, url in enumerate(urls):
-                    if active_batch_scans[batch_id]["stop_requested"]:
+            for i, url in enumerate(urls):
+                if active_batch_scans[batch_id]["stop_requested"]:
+                    break
+
+                active_batch_scans[batch_id]["current_index"] = i
+
+                # Notify: starting this domain
+                q.put({
+                    "event": "batch_status",
+                    "data": {
+                        "current_url": url,
+                        "current_index": i,
+                        "total": len(urls),
+                        "message": f"Starting scan of {url}",
+                        "step": 0,
+                        "total_steps": 20,
+                    },
+                })
+
+                # Create a scan_id so evidence/PDF routes work
+                scan_id = str(uuid.uuid4())
+
+                # ── Run scan in separate process with hard kill timeout ──
+                mp_result_queue = multiprocessing.Queue()
+                mp_status_queue = multiprocessing.Queue()
+
+                proc = multiprocessing.Process(
+                    target=_scan_worker,
+                    args=(url, mp_result_queue, mp_status_queue),
+                )
+                proc.start()
+                start_time = time.time()
+                timed_out = False
+
+                # Relay status updates while process is alive
+                while proc.is_alive():
+                    elapsed = time.time() - start_time
+                    if elapsed > MAX_SCAN_TIME:
+                        proc.kill()
+                        proc.join()
+                        timed_out = True
                         break
 
-                    active_batch_scans[batch_id]["current_index"] = i
+                    # Drain status messages
+                    while not mp_status_queue.empty():
+                        try:
+                            status = mp_status_queue.get_nowait()
+                            status["current_url"] = url
+                            status["current_index"] = i
+                            status["total"] = len(urls)
+                            q.put({"event": "batch_status", "data": status})
+                        except Exception:
+                            break
 
-                    # Notify: starting this domain
-                    q.put({
-                        "event": "batch_status",
-                        "data": {
-                            "current_url": url,
-                            "current_index": i,
-                            "total": len(urls),
-                            "message": f"Starting scan of {url}",
-                            "step": 0,
-                            "total_steps": 20,
-                        },
-                    })
+                    time.sleep(0.2)
 
-                    # Create a scan_id so evidence/PDF routes work
-                    scan_id = str(uuid.uuid4())
+                if not timed_out:
+                    proc.join()
 
-                    def status_callback(message, step, total_steps, elapsed=0, _url=url, _i=i):
-                        q.put({
-                            "event": "batch_status",
-                            "data": {
-                                "current_url": _url,
-                                "current_index": _i,
-                                "total": len(urls),
-                                "message": message,
-                                "step": step,
-                                "total_steps": total_steps,
-                                "elapsed": round(elapsed, 1),
-                            },
-                        })
-
+                # Drain remaining status messages
+                while not mp_status_queue.empty():
                     try:
-                        result = scanner.scan_url(browser, url, status_callback=status_callback)
+                        mp_status_queue.get_nowait()
+                    except Exception:
+                        break
 
-                        # Store in active_scans so existing evidence/PDF routes work
-                        active_scans[scan_id] = {
-                            "queue": Queue(),
-                            "result": result,
-                            "error": None,
-                            "done": True,
+                if timed_out:
+                    result = {
+                        "url": url,
+                        "still_tracking": "timeout",
+                        "tiktok_trackers_after": [],
+                        "trackers_after": [],
+                        "trackers_before": [],
+                        "opt_out_found": "unknown",
+                        "opt_out_clicked": "unknown",
+                        "error": f"Scan timed out after {MAX_SCAN_TIME}s — killed",
+                    }
+                else:
+                    try:
+                        result = mp_result_queue.get(timeout=5)
+                    except Exception:
+                        result = {
+                            "url": url,
+                            "still_tracking": "unknown",
+                            "tiktok_trackers_after": [],
+                            "error": "Scan process ended without returning results",
                         }
 
-                        active_batch_scans[batch_id]["results"][url] = result
-                        active_batch_scans[batch_id]["scan_ids"][url] = scan_id
+                # Store in active_scans so existing evidence/PDF routes work
+                active_scans[scan_id] = {
+                    "queue": Queue(),
+                    "result": result,
+                    "error": None,
+                    "done": True,
+                }
 
-                        # Pre-generate evidence package in background.
-                        _pregenerate_evidence(scan_id, result)
+                active_batch_scans[batch_id]["results"][url] = result
+                active_batch_scans[batch_id]["scan_ids"][url] = scan_id
 
-                        st = result.get("still_tracking")
-                        if st == "yes":
-                            violations += 1
-                        elif st in ("timeout", "inconclusive"):
-                            pass  # Don't count as clean or violation
-                        else:
-                            clean += 1
+                # Pre-generate evidence package in background (skip for timeouts).
+                if not timed_out:
+                    _pregenerate_evidence(scan_id, result)
 
-                        q.put({
-                            "event": "domain_complete",
-                            "data": {
-                                "url": url,
-                                "scan_id": scan_id,
-                                "result": result,
-                            },
-                        })
+                st = result.get("still_tracking")
+                if st == "yes":
+                    violations += 1
+                elif st in ("timeout", "inconclusive"):
+                    pass  # Don't count as clean or violation
+                else:
+                    clean += 1
 
-                    except Exception as e:
-                        q.put({
-                            "event": "domain_complete",
-                            "data": {
-                                "url": url,
-                                "scan_id": None,
-                                "result": {
-                                    "url": url,
-                                    "still_tracking": "error",
-                                    "error": str(e),
-                                },
-                            },
-                        })
-
-                browser.close()
+                q.put({
+                    "event": "domain_complete",
+                    "data": {
+                        "url": url,
+                        "scan_id": scan_id,
+                        "result": result,
+                    },
+                })
 
         except Exception as e:
             q.put({"event": "batch_error", "data": {"message": str(e)}})
