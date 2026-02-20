@@ -1609,6 +1609,18 @@ def navigate_to_product(page, timeout_checker=None):
     """
     page_origin = urlparse(page.url)
     base_url = f"{page_origin.scheme}://{page_origin.hostname}"
+    target_host = (page_origin.hostname or "").lower().replace("www.", "")
+
+    def _is_same_site(url):
+        """Filter out external URLs (e.g. onetrust.com/products/)."""
+        try:
+            parsed = urlparse(url)
+            if not parsed.hostname:
+                return True  # relative URL — same site
+            host = parsed.hostname.lower().replace("www.", "")
+            return host == target_host or host.endswith("." + target_host)
+        except Exception:
+            return False
 
     EXTRACT_PRODUCT_URLS_JS = """() => {
         const selectors = [
@@ -1671,7 +1683,8 @@ def navigate_to_product(page, timeout_checker=None):
     # Step 1: Try the CURRENT page first (STEP 3 already navigated to a shop page)
     print(f"  Checking current page for product URLs: {page.url[:80]}")
     product_urls = page.evaluate(EXTRACT_PRODUCT_URLS_JS)
-    print(f"  querySelectorAll found {len(product_urls)} product URLs on current page")
+    product_urls = [u for u in product_urls if _is_same_site(u)]
+    print(f"  querySelectorAll found {len(product_urls)} same-site product URLs on current page")
     for i, url in enumerate(product_urls[:5]):
         print(f"    [{i}] {url[:100]}")
 
@@ -1685,7 +1698,8 @@ def navigate_to_product(page, timeout_checker=None):
         print("  No product URLs from selectors — trying regex on current page HTML...")
         html = page.evaluate("() => document.documentElement.innerHTML")
         product_urls = _extract_from_html(html)
-        print(f"  Regex found {len(product_urls)} product URLs")
+        product_urls = [u for u in product_urls if _is_same_site(u)]
+        print(f"  Regex found {len(product_urls)} same-site product URLs")
         for i, url in enumerate(product_urls[:5]):
             print(f"    [{i}] {url[:100]}")
         if product_urls:
@@ -1710,14 +1724,16 @@ def navigate_to_product(page, timeout_checker=None):
 
             # Extract product URLs from this page
             product_urls = page.evaluate(EXTRACT_PRODUCT_URLS_JS)
-            print(f"  querySelectorAll found {len(product_urls)} product URLs")
+            product_urls = [u for u in product_urls if _is_same_site(u)]
+            print(f"  querySelectorAll found {len(product_urls)} same-site product URLs")
             for i, url in enumerate(product_urls[:5]):
                 print(f"    [{i}] {url[:100]}")
 
             if not product_urls:
                 html = page.evaluate("() => document.documentElement.innerHTML")
                 product_urls = _extract_from_html(html)
-                print(f"  Regex found {len(product_urls)} product URLs")
+                product_urls = [u for u in product_urls if _is_same_site(u)]
+                print(f"  Regex found {len(product_urls)} same-site product URLs")
                 for i, url in enumerate(product_urls[:5]):
                     print(f"    [{i}] {url[:100]}")
 
