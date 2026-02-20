@@ -1400,99 +1400,254 @@ def navigate_to_shop(page):
     return None
 
 
-def click_first_product(page):
+def click_product_and_verify(page, timeout_checker=None):
     """
-    On a shop/collection page, find and click the first product link.
+    Try multiple strategies to click a product and land on a product page.
 
-    Tries common product card selectors used by Shopify, custom stores,
-    and other e-commerce platforms.
-
-    Returns True if a product was clicked, False otherwise.
+    Returns (success: bool, product_url: str or None).
+    success is True ONLY if the URL changed to something that looks like
+    a product page (not the same category/shop/homepage URL).
     """
-    # Common selectors for product cards / product links.
-    product_selectors = [
-        # Shopify themes
-        '.product-card a[href*="/products/"]',
-        '.product-grid-item a[href*="/products/"]',
-        '.grid__item a[href*="/products/"]',
-        'a.product-card[href*="/products/"]',
-        # Generic product links (plural and singular paths)
-        'a[href*="/products/"]',
-        'a[href*="/product/"]',
-        'a[href*="/shop/"]',
-        'a[href*="/p/"]',
-        'a[href*="/dp/"]',
-        'a[href*="/item/"]',
-        # Product cards with images (common pattern)
-        '.product a',
-        '.product-item a',
-        '.collection-product a',
-        '[data-product] a',
-        '.product-tile a',
-        '.product-list a',
-        # Grid-based layouts
-        '.grid-product a',
-        '.product-grid a',
-        # Generic fallbacks (non-Shopify sites)
-        '[class*="product"] a[href]',
-        '[class*="tile"] a[href]',
-        'article a[href]',
-        '.card a[href]',
-        '.grid-item a[href]',
-        '[data-testid*="product"] a',
-    ]
 
-    for selector in product_selectors:
-        try:
-            locator = page.locator(selector).first
-            if locator.is_visible(timeout=500):
-                locator.click(timeout=5000)
-                return True
-        except Exception:
-            continue
+    def _check_timeout():
+        if timeout_checker:
+            timeout_checker("product click")
 
-    # Scroll down to trigger lazy-loaded product grids (SPAs), then retry.
-    try:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-        page.wait_for_timeout(3000)
-        for selector in product_selectors:
-            try:
-                locator = page.locator(selector).first
-                if locator.is_visible(timeout=500):
-                    locator.click(timeout=5000)
+    url_before = page.url
+
+    def _url_is_product(new_url):
+        """Check if URL changed and looks like a product page."""
+        if new_url == url_before:
+            return False
+        path = urlparse(new_url).path.lower()
+        # Must have a slug after the path prefix (not just /products/ or /shop/)
+        product_patterns = ["/products/", "/product/", "/p/", "/dp/", "/item/"]
+        for pat in product_patterns:
+            if pat in path:
+                after = path.split(pat, 1)[1].strip("/")
+                if after:  # has a slug
                     return True
-            except Exception:
-                continue
-    except Exception:
-        pass
+        return new_url != url_before  # at least URL changed
 
-    # Last resort: use JavaScript to find any large image-bearing link
-    # that looks like a product card (not in nav/header/footer).
+    def _try_click_and_verify(description, click_fn):
+        """Click using click_fn, wait, check if URL changed to product page."""
+        print(f"  PRODUCT CLICK: Trying {description}...")
+        pre = page.url
+        try:
+            click_fn()
+            page.wait_for_timeout(5000)
+            new_url = page.url
+            if new_url != pre and _url_is_product(new_url):
+                print(f"  PRODUCT CLICK: SUCCESS via {description} → {new_url}")
+                return True
+            elif new_url != pre:
+                print(f"  PRODUCT CLICK: URL changed but doesn't look like product: {new_url}")
+                return False
+            else:
+                print(f"  PRODUCT CLICK: URL unchanged after {description}")
+                return False
+        except Exception as e:
+            print(f"  PRODUCT CLICK: {description} failed: {e}")
+            return False
+
+    # ── ATTEMPT 1: <a> tags in main content containing <img> ──────────
+    print("STEP 4 ATTEMPT 1: Links with images in main content area...")
+    _check_timeout()
     try:
-        clicked = page.evaluate("""() => {
+        result = page.evaluate("""() => {
             const links = Array.from(document.querySelectorAll('a[href]'));
+            const candidates = [];
             for (const a of links) {
                 const href = a.getAttribute('href') || '';
                 if (!href || href === '/' || href === '#' || href.startsWith('javascript:')) continue;
-                // Skip nav/header/footer links.
                 if (a.closest('nav') || a.closest('header') || a.closest('footer')) continue;
-                const rect = a.getBoundingClientRect();
                 const img = a.querySelector('img');
-                // Must have an image, be visible, and be reasonably sized.
-                if (img && rect.width > 80 && rect.height > 80 &&
-                    rect.top > 50 && rect.top < window.innerHeight * 2) {
-                    a.click();
-                    return true;
-                }
+                if (!img) continue;
+                const rect = a.getBoundingClientRect();
+                if (rect.width < 50 || rect.height < 50) continue;
+                if (rect.top < 0 || rect.top > window.innerHeight * 3) continue;
+                candidates.push({
+                    href: href,
+                    top: rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                    area: rect.width * rect.height
+                });
             }
-            return false;
+            candidates.sort((a, b) => b.area - a.area);
+            return candidates.slice(0, 10);
         }""")
-        if clicked:
-            return True
-    except Exception:
-        pass
+        print(f"  ATTEMPT 1: Found {len(result)} image-link candidates")
+        for i, cand in enumerate(result[:5]):
+            print(f"    [{i}] {cand['href'][:80]}  ({cand['width']:.0f}x{cand['height']:.0f})")
 
-    return False
+        for i, cand in enumerate(result[:5]):
+            href = cand["href"]
+            success = _try_click_and_verify(
+                f"image-link #{i} ({href[:60]})",
+                lambda h=href: page.locator(f'a[href="{h}"]').first.click(timeout=5000)
+            )
+            if success:
+                return True, page.url
+            # If URL changed but not product, go back and try next
+            if page.url != url_before:
+                page.go_back(timeout=10000)
+                page.wait_for_timeout(2000)
+    except Exception as e:
+        print(f"  ATTEMPT 1 error: {e}")
+
+    # ── ATTEMPT 2: Common product card CSS selectors ──────────────────
+    print("STEP 4 ATTEMPT 2: CSS product card selectors...")
+    _check_timeout()
+    product_selectors = [
+        'a[href*="/products/"]',
+        'a[href*="/product/"]',
+        'a[href*="/collections/"] img',
+        '.product-card a',
+        '.product-item a',
+        '.grid-item a',
+        '[data-product] a',
+        '.collection-product a',
+        '.product-tile a',
+        '.product-grid-item a',
+        '.grid__item a[href*="/products/"]',
+        '[class*="product"] a[href]',
+        'article a[href]',
+        '.card a[href]',
+        '[data-testid*="product"] a',
+    ]
+
+    for sel in product_selectors:
+        _check_timeout()
+        try:
+            # For the img selector, we need to click the parent <a>
+            if sel.endswith(' img'):
+                parent_sel = sel.replace(' img', '')
+                loc = page.locator(parent_sel).first
+            else:
+                loc = page.locator(sel).first
+            if not loc.is_visible(timeout=500):
+                continue
+            count = page.locator(sel.split(' img')[0] if ' img' in sel else sel).count()
+            print(f"  ATTEMPT 2: Selector '{sel}' → {count} matches")
+            success = _try_click_and_verify(
+                f"selector '{sel}'",
+                lambda l=loc: l.click(timeout=5000)
+            )
+            if success:
+                return True, page.url
+            if page.url != url_before:
+                page.go_back(timeout=10000)
+                page.wait_for_timeout(2000)
+        except Exception:
+            continue
+
+    # ── ATTEMPT 3: JS filter — links with product-like hrefs + images ─
+    print("STEP 4 ATTEMPT 3: JS filter for product-like links with images...")
+    _check_timeout()
+    try:
+        # Scroll to reveal lazy-loaded content
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
+        page.wait_for_timeout(2000)
+
+        candidates = page.evaluate("""() => {
+            const links = Array.from(document.querySelectorAll('a[href]'));
+            const results = [];
+            const productPatterns = ['/product', '/collection', '/shop/', '/p/', '/item/', '/dp/'];
+            for (const a of links) {
+                const href = (a.getAttribute('href') || '').toLowerCase();
+                if (!href || href === '/' || href === '#') continue;
+                const hasProductPath = productPatterns.some(p => href.includes(p));
+                if (!hasProductPath) continue;
+                const img = a.querySelector('img');
+                if (!img) continue;
+                const rect = a.getBoundingClientRect();
+                if (rect.width < 30 || rect.height < 30) continue;
+                if (rect.top < 0 || rect.top > document.documentElement.scrollHeight) continue;
+                results.push({
+                    href: a.getAttribute('href'),
+                    area: rect.width * rect.height
+                });
+            }
+            results.sort((a, b) => b.area - a.area);
+            return results.slice(0, 5);
+        }""")
+        print(f"  ATTEMPT 3: Found {len(candidates)} product-like image links")
+        for i, c in enumerate(candidates):
+            print(f"    [{i}] {c['href'][:80]}")
+
+        for i, c in enumerate(candidates):
+            href = c["href"]
+            success = _try_click_and_verify(
+                f"JS product link #{i}",
+                lambda h=href: page.locator(f'a[href="{h}"]').first.click(timeout=5000)
+            )
+            if success:
+                return True, page.url
+            if page.url != url_before:
+                page.go_back(timeout=10000)
+                page.wait_for_timeout(2000)
+    except Exception as e:
+        print(f"  ATTEMPT 3 error: {e}")
+
+    # ── ATTEMPT 4: Direct URL navigation fallbacks ────────────────────
+    print("STEP 4 ATTEMPT 4: Direct URL navigation fallbacks...")
+    _check_timeout()
+    base = urlparse(url_before).scheme + "://" + urlparse(url_before).hostname
+    fallback_paths = ["/collections/all", "/products", "/shop", "/collections"]
+
+    for path in fallback_paths:
+        _check_timeout()
+        fallback_url = base + path
+        print(f"  ATTEMPT 4: Navigating to {fallback_url}...")
+        try:
+            page.goto(fallback_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+
+            if page.url.rstrip("/") == url_before.rstrip("/"):
+                print(f"  ATTEMPT 4: {path} redirected back to same page")
+                continue
+
+            # Now try to click a product on this collection page
+            candidates = page.evaluate("""() => {
+                const links = Array.from(document.querySelectorAll('a[href]'));
+                const results = [];
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    if (!href || href === '/' || href === '#') continue;
+                    if (a.closest('nav') || a.closest('header') || a.closest('footer')) continue;
+                    const img = a.querySelector('img');
+                    if (!img) continue;
+                    const rect = a.getBoundingClientRect();
+                    if (rect.width < 50 || rect.height < 50) continue;
+                    if (rect.top < 0 || rect.top > window.innerHeight * 3) continue;
+                    results.push({href: href, area: rect.width * rect.height});
+                }
+                results.sort((a, b) => b.area - a.area);
+                return results.slice(0, 3);
+            }""")
+
+            if candidates:
+                print(f"  ATTEMPT 4: Found {len(candidates)} products on {path}")
+                for c in candidates:
+                    pre_nav = page.url
+                    success = _try_click_and_verify(
+                        f"product on {path}",
+                        lambda h=c["href"]: page.locator(f'a[href="{h}"]').first.click(timeout=5000)
+                    )
+                    if success:
+                        return True, page.url
+                    if page.url != pre_nav:
+                        page.go_back(timeout=10000)
+                        page.wait_for_timeout(2000)
+            else:
+                print(f"  ATTEMPT 4: No products found on {path}")
+        except Exception as e:
+            print(f"  ATTEMPT 4: {path} failed: {e}")
+            continue
+
+    print("STEP 4: ALL product click attempts FAILED.")
+    return False, None
 
 
 def group_requests_by_domain(captured_requests):
@@ -1844,108 +1999,47 @@ def scan_url(browser, url, status_callback=None):
 
         try:
             check_timeout("before product click")
+            report_status("STEP 4: Clicking product...", 13)
 
-            try:
-                pl = page.locator(
-                    'a[href*="/products/"], a[href*="/product/"], '
-                    'a[href*="/shop/"], a[href*="/p/"], a[href*="/item/"]'
-                )
-                print(f"STEP 4: Found {pl.count()} product links on page")
-            except Exception:
-                pass
+            on_product_page, product_url = click_product_and_verify(
+                page, timeout_checker=check_timeout
+            )
 
-            pre_click_url = page.url
-            product_clicked = click_first_product(page)
-
-            if product_clicked:
-                print("STEP 4: Clicked product — waiting 3s for load...")
-                report_status("STEP 4: Clicked product — loading...", 13)
-                page.wait_for_timeout(3000)
-                check_timeout("product page load")
-
-                current_url = page.url
-                url_changed = current_url != pre_click_url
-                if url_changed:
-                    on_product_page = True
-                    print(f"STEP 4: Now on product page: {current_url}")
-                else:
-                    print(f"STEP 4: URL unchanged — trying another product...")
-                    retry_selectors = [
-                        'a[href*="/products/"]:nth-of-type(2)',
-                        'a[href*="/products/"]:nth-of-type(3)',
-                        '.product-card a[href*="/products/"]',
-                        'a[href*="/product/"]',
-                    ]
-                    for sel in retry_selectors:
-                        try:
-                            loc = page.locator(sel).first
-                            if loc.is_visible(timeout=500):
-                                loc.click(timeout=15000)
-                                page.wait_for_timeout(3000)
-                                if page.url != pre_click_url:
-                                    on_product_page = True
-                                    print(f"STEP 4: Now on product page: {page.url}")
-                                    break
-                        except Exception:
-                            continue
-
-            if not product_clicked and not on_product_page:
-                sub_texts = ["New Arrivals", "Jeans", "Dresses", "Tops", "Shoes",
-                             "Bags", "All", "View All", "See All", "Shop All"]
-                for sub in sub_texts:
-                    try:
-                        loc = page.locator(f'a:has-text("{sub}")').first
-                        if loc.is_visible(timeout=500):
-                            pre = page.url
-                            loc.click(timeout=15000)
-                            page.wait_for_timeout(3000)
-                            if page.url != pre:
-                                print(f"STEP 4: Navigated to subcategory via '{sub}': {page.url}")
-                                product_clicked = click_first_product(page)
-                                if product_clicked:
-                                    page.wait_for_timeout(3000)
-                                    on_product_page = page.url != pre
-                                    print(f"STEP 4: Now on product page: {page.url}")
-                                    break
-                    except Exception:
-                        continue
-
-            if not product_clicked and not on_product_page:
-                print("STEP 4: Could not find a product to click.")
+            if on_product_page:
+                results["product_page_url"] = product_url
+                print(f"STEP 4: CONFIRMED on product page: {product_url}")
+            else:
+                print("STEP 4: ALL product click attempts FAILED — marking INCONCLUSIVE")
                 results["notes"].append(
-                    "Could not find a product to click; monitored current page instead."
+                    "Could not navigate to a product page; scan marked INCONCLUSIVE."
                 )
+                results["still_tracking"] = "inconclusive"
+
         except ScanTimeout:
             raise
         except Exception as e:
-            print(f"[!] STEP 4: Product click failed ({e}) — skipping to next step")
+            print(f"[!] STEP 4: Product click failed ({e}) — marking INCONCLUSIVE")
             results["notes"].append(f"Product click step failed: {e}")
+            results["still_tracking"] = "inconclusive"
 
         # ── Take product page screenshot ───────────────────────────────
         current_url = page.url
-        print(f"\n>>> BROWSING PRODUCT PAGE: {current_url}")
-        results["product_page_url"] = current_url
 
-        target_base = domain.replace("www.", "")
-        is_homepage = (
-            current_url.rstrip("/") == url.rstrip("/")
-            or current_url.rstrip("/") == f"https://{target_base}"
-            or current_url.rstrip("/") == f"https://www.{target_base}"
-        )
-        if is_homepage:
-            print(f"STEP 5: WARNING — still on homepage ({current_url})")
-            results["notes"].append("WARNING: Evidence screenshot taken on homepage, not product page.")
+        if on_product_page:
+            print(f"\n>>> EVIDENCE SCREENSHOT taken on: {current_url}")
+            results["product_page_url"] = current_url
+
+            product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
+            try:
+                page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
+                results["screenshot_product"] = product_ss_path
+                print(f"STEP 5: Product screenshot saved: {product_ss_path}")
+            except Exception as e:
+                print(f"STEP 5: Screenshot failed: {e}")
+            report_status("STEP 5: Product page screenshot taken", 14)
         else:
-            print("STEP 5: Confirmed on product page (not homepage)")
-
-        product_ss_path = os.path.join(SCREENSHOTS_DIR, f"{safe_domain}_product.png")
-        try:
-            page.screenshot(path=product_ss_path, full_page=False, timeout=5000)
-            results["screenshot_product"] = product_ss_path
-            print(f"STEP 5: Product screenshot saved: {product_ss_path}")
-        except Exception as e:
-            print(f"STEP 5: Screenshot failed: {e}")
-        report_status("STEP 5: Product page screenshot taken", 14)
+            print(f"STEP 5: SKIPPING screenshot — not on a product page ({current_url})")
+            report_status("STEP 5: No product page found — skipping screenshot", 14)
 
         # ═══════════════════════════════════════════════════════════════
         # NOW — Attach the monitoring listener.
