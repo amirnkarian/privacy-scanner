@@ -1402,107 +1402,134 @@ def navigate_to_shop(page):
 
 def click_product_and_verify(page, timeout_checker=None):
     """
-    Try multiple strategies to click a product and land on a product page.
+    Try multiple strategies to land on a product page.
+
+    Uses page.goto() for navigation instead of clicking DOM elements,
+    because many sites have hidden nav copies of product links that
+    Playwright's click() won't interact with.
 
     Returns (success: bool, product_url: str or None).
-    success is True ONLY if the URL changed to something that looks like
-    a product page (not the same category/shop/homepage URL).
+    success is True ONLY if we landed on a URL with a product slug.
     """
 
     def _check_timeout():
         if timeout_checker:
             timeout_checker("product click")
 
-    url_before = page.url
+    page_origin = urlparse(page.url)
+    base_url = f"{page_origin.scheme}://{page_origin.hostname}"
 
-    def _url_is_product(new_url):
-        """Check if URL changed and looks like a product page."""
-        if new_url == url_before:
-            return False
-        path = urlparse(new_url).path.lower()
-        # Must have a slug after the path prefix (not just /products/ or /shop/)
-        product_patterns = ["/products/", "/product/", "/p/", "/dp/", "/item/"]
-        for pat in product_patterns:
+    def _is_product_url(url):
+        """Does this URL have a product slug? e.g. /products/foo-bar"""
+        path = urlparse(url).path.lower()
+        for pat in ["/products/", "/product/", "/p/", "/dp/", "/item/"]:
             if pat in path:
                 after = path.split(pat, 1)[1].strip("/")
-                if after:  # has a slug
+                if after and "/" not in after[:40]:  # has a slug, not just another path
                     return True
-        return new_url != url_before  # at least URL changed
+        return False
 
-    def _try_click_and_verify(description, click_fn):
-        """Click using click_fn, wait, check if URL changed to product page."""
-        print(f"  PRODUCT CLICK: Trying {description}...")
-        pre = page.url
+    def _resolve_href(href):
+        """Turn a relative or absolute href into a full URL."""
+        if href.startswith("http"):
+            return href
+        if href.startswith("//"):
+            return page_origin.scheme + ":" + href
+        if href.startswith("/"):
+            return base_url + href
+        return base_url + "/" + href
+
+    def _goto_and_check(description, href):
+        """Navigate directly via page.goto(), check if it's a product page."""
+        full_url = _resolve_href(href)
+        print(f"  PRODUCT NAV: Trying {description}: {full_url[:80]}...")
         try:
-            click_fn()
-            page.wait_for_timeout(5000)
-            new_url = page.url
-            if new_url != pre and _url_is_product(new_url):
-                print(f"  PRODUCT CLICK: SUCCESS via {description} → {new_url}")
+            page.goto(full_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            landed = page.url
+            if _is_product_url(landed):
+                print(f"  PRODUCT NAV: SUCCESS → {landed}")
                 return True
-            elif new_url != pre:
-                print(f"  PRODUCT CLICK: URL changed but doesn't look like product: {new_url}")
-                return False
             else:
-                print(f"  PRODUCT CLICK: URL unchanged after {description}")
+                print(f"  PRODUCT NAV: Landed on {landed} — not a product page")
                 return False
         except Exception as e:
-            print(f"  PRODUCT CLICK: {description} failed: {e}")
+            print(f"  PRODUCT NAV: {description} failed: {e}")
             return False
 
-    # ── ATTEMPT 1: <a> tags in main content containing <img> ──────────
-    print("STEP 4 ATTEMPT 1: Links with images in main content area...")
+    # ── JS helper: find VISIBLE links with images (not in nav/header/footer)
+    VISIBLE_IMAGE_LINKS_JS = """() => {
+        const links = Array.from(document.querySelectorAll('a[href]'));
+        const candidates = [];
+        for (const a of links) {
+            const href = a.getAttribute('href') || '';
+            if (!href || href === '/' || href === '#' || href.startsWith('javascript:')) continue;
+            // Skip nav, header, footer, search overlays
+            if (a.closest('nav') || a.closest('header') || a.closest('footer')) continue;
+            if (a.closest('[class*="search"]') || a.closest('[class*="menu"]')) continue;
+            // Check actual visibility
+            const style = window.getComputedStyle(a);
+            if (style.display === 'none' || style.visibility === 'hidden' ||
+                style.opacity === '0' || a.offsetParent === null) continue;
+            const img = a.querySelector('img');
+            if (!img) continue;
+            const rect = a.getBoundingClientRect();
+            if (rect.width < 80 || rect.height < 80) continue;
+            // Must be in viewport or just below it (not far off-screen)
+            if (rect.top < -50 || rect.top > window.innerHeight * 3) continue;
+            candidates.push({
+                href: href,
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+                area: Math.round(rect.width * rect.height)
+            });
+        }
+        // Deduplicate by href
+        const seen = new Set();
+        const unique = [];
+        for (const c of candidates) {
+            if (!seen.has(c.href)) {
+                seen.add(c.href);
+                unique.push(c);
+            }
+        }
+        unique.sort((a, b) => b.area - a.area);
+        return unique.slice(0, 10);
+    }"""
+
+    # ── ATTEMPT 1: Visible <a> tags with <img> in main content ────────
+    print("STEP 4 ATTEMPT 1: Visible image links in main content...")
     _check_timeout()
     try:
-        result = page.evaluate("""() => {
-            const links = Array.from(document.querySelectorAll('a[href]'));
-            const candidates = [];
-            for (const a of links) {
-                const href = a.getAttribute('href') || '';
-                if (!href || href === '/' || href === '#' || href.startsWith('javascript:')) continue;
-                if (a.closest('nav') || a.closest('header') || a.closest('footer')) continue;
-                const img = a.querySelector('img');
-                if (!img) continue;
-                const rect = a.getBoundingClientRect();
-                if (rect.width < 50 || rect.height < 50) continue;
-                if (rect.top < 0 || rect.top > window.innerHeight * 3) continue;
-                candidates.push({
-                    href: href,
-                    top: rect.top,
-                    width: rect.width,
-                    height: rect.height,
-                    area: rect.width * rect.height
-                });
-            }
-            candidates.sort((a, b) => b.area - a.area);
-            return candidates.slice(0, 10);
-        }""")
-        print(f"  ATTEMPT 1: Found {len(result)} image-link candidates")
+        result = page.evaluate(VISIBLE_IMAGE_LINKS_JS)
+        print(f"  ATTEMPT 1: Found {len(result)} visible image-link candidates")
         for i, cand in enumerate(result[:5]):
-            print(f"    [{i}] {cand['href'][:80]}  ({cand['width']:.0f}x{cand['height']:.0f})")
+            print(f"    [{i}] {cand['href'][:80]}  ({cand['width']}x{cand['height']})")
 
-        for i, cand in enumerate(result[:5]):
-            href = cand["href"]
-            success = _try_click_and_verify(
-                f"image-link #{i} ({href[:60]})",
-                lambda h=href: page.locator(f'a[href="{h}"]').first.click(timeout=5000)
-            )
-            if success:
+        # Try product-like hrefs first
+        product_hrefs = [c for c in result if any(
+            p in c["href"].lower() for p in ["/products/", "/product/", "/p/", "/dp/", "/item/"]
+        )]
+        other_hrefs = [c for c in result if c not in product_hrefs]
+
+        for cand in product_hrefs[:3]:
+            _check_timeout()
+            if _goto_and_check(f"image-link (product href)", cand["href"]):
                 return True, page.url
-            # If URL changed but not product, go back and try next
-            if page.url != url_before:
-                page.go_back(timeout=10000)
-                page.wait_for_timeout(2000)
+
+        for cand in other_hrefs[:3]:
+            _check_timeout()
+            if _goto_and_check(f"image-link (other href)", cand["href"]):
+                return True, page.url
     except Exception as e:
         print(f"  ATTEMPT 1 error: {e}")
 
-    # ── ATTEMPT 2: Common product card CSS selectors ──────────────────
-    print("STEP 4 ATTEMPT 2: CSS product card selectors...")
+    # ── ATTEMPT 2: CSS selectors → get href → goto ───────────────────
+    print("STEP 4 ATTEMPT 2: CSS product selectors → direct navigation...")
     _check_timeout()
     product_selectors = [
         'a[href*="/products/"]',
         'a[href*="/product/"]',
-        'a[href*="/collections/"] img',
         '.product-card a',
         '.product-item a',
         '.grid-item a',
@@ -1517,131 +1544,123 @@ def click_product_and_verify(page, timeout_checker=None):
         '[data-testid*="product"] a',
     ]
 
+    tried_hrefs = set()
     for sel in product_selectors:
         _check_timeout()
         try:
-            # For the img selector, we need to click the parent <a>
-            if sel.endswith(' img'):
-                parent_sel = sel.replace(' img', '')
-                loc = page.locator(parent_sel).first
-            else:
-                loc = page.locator(sel).first
-            if not loc.is_visible(timeout=500):
+            # Get all hrefs matching this selector via JS (avoids visibility issues)
+            hrefs = page.evaluate(f"""() => {{
+                const els = document.querySelectorAll('{sel}');
+                const hrefs = new Set();
+                for (const el of els) {{
+                    const a = el.closest('a') || el;
+                    const href = a.getAttribute('href');
+                    if (href && href !== '/' && href !== '#' && !href.startsWith('javascript:')) {{
+                        hrefs.add(href);
+                    }}
+                }}
+                return Array.from(hrefs).slice(0, 5);
+            }}""")
+            if not hrefs:
                 continue
-            count = page.locator(sel.split(' img')[0] if ' img' in sel else sel).count()
-            print(f"  ATTEMPT 2: Selector '{sel}' → {count} matches")
-            success = _try_click_and_verify(
-                f"selector '{sel}'",
-                lambda l=loc: l.click(timeout=5000)
-            )
-            if success:
-                return True, page.url
-            if page.url != url_before:
-                page.go_back(timeout=10000)
-                page.wait_for_timeout(2000)
+            print(f"  ATTEMPT 2: '{sel}' → {len(hrefs)} unique hrefs")
+            for href in hrefs:
+                if href in tried_hrefs:
+                    continue
+                tried_hrefs.add(href)
+                _check_timeout()
+                if _goto_and_check(f"CSS '{sel}'", href):
+                    return True, page.url
         except Exception:
             continue
 
-    # ── ATTEMPT 3: JS filter — links with product-like hrefs + images ─
-    print("STEP 4 ATTEMPT 3: JS filter for product-like links with images...")
+    # ── ATTEMPT 3: Scroll to reveal lazy content, re-scan ─────────────
+    print("STEP 4 ATTEMPT 3: Scroll + re-scan for product links...")
     _check_timeout()
     try:
-        # Scroll to reveal lazy-loaded content
         page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)
 
         candidates = page.evaluate("""() => {
             const links = Array.from(document.querySelectorAll('a[href]'));
             const results = [];
-            const productPatterns = ['/product', '/collection', '/shop/', '/p/', '/item/', '/dp/'];
+            const productPatterns = ['/products/', '/product/', '/p/', '/dp/', '/item/'];
             for (const a of links) {
-                const href = (a.getAttribute('href') || '').toLowerCase();
+                const href = (a.getAttribute('href') || '');
                 if (!href || href === '/' || href === '#') continue;
-                const hasProductPath = productPatterns.some(p => href.includes(p));
-                if (!hasProductPath) continue;
-                const img = a.querySelector('img');
-                if (!img) continue;
-                const rect = a.getBoundingClientRect();
-                if (rect.width < 30 || rect.height < 30) continue;
-                if (rect.top < 0 || rect.top > document.documentElement.scrollHeight) continue;
-                results.push({
-                    href: a.getAttribute('href'),
-                    area: rect.width * rect.height
+                const hasSlug = productPatterns.some(p => {
+                    const idx = href.toLowerCase().indexOf(p);
+                    if (idx < 0) return false;
+                    const after = href.substring(idx + p.length).replace(/[?#].*/, '').trim();
+                    return after.length > 0;
                 });
+                if (!hasSlug) continue;
+                results.push(href);
             }
-            results.sort((a, b) => b.area - a.area);
-            return results.slice(0, 5);
+            return [...new Set(results)].slice(0, 10);
         }""")
-        print(f"  ATTEMPT 3: Found {len(candidates)} product-like image links")
-        for i, c in enumerate(candidates):
-            print(f"    [{i}] {c['href'][:80]}")
+        print(f"  ATTEMPT 3: Found {len(candidates)} product-slug links after scroll")
+        for i, href in enumerate(candidates[:5]):
+            print(f"    [{i}] {href[:80]}")
 
-        for i, c in enumerate(candidates):
-            href = c["href"]
-            success = _try_click_and_verify(
-                f"JS product link #{i}",
-                lambda h=href: page.locator(f'a[href="{h}"]').first.click(timeout=5000)
-            )
-            if success:
+        for href in candidates[:5]:
+            if href in tried_hrefs:
+                continue
+            tried_hrefs.add(href)
+            _check_timeout()
+            if _goto_and_check(f"scroll-revealed product link", href):
                 return True, page.url
-            if page.url != url_before:
-                page.go_back(timeout=10000)
-                page.wait_for_timeout(2000)
     except Exception as e:
         print(f"  ATTEMPT 3 error: {e}")
 
-    # ── ATTEMPT 4: Direct URL navigation fallbacks ────────────────────
-    print("STEP 4 ATTEMPT 4: Direct URL navigation fallbacks...")
+    # ── ATTEMPT 4: Go to /collections/all, /products, /shop → pick product
+    print("STEP 4 ATTEMPT 4: Navigate to collection pages, find products...")
     _check_timeout()
-    base = urlparse(url_before).scheme + "://" + urlparse(url_before).hostname
     fallback_paths = ["/collections/all", "/products", "/shop", "/collections"]
 
     for path in fallback_paths:
         _check_timeout()
-        fallback_url = base + path
-        print(f"  ATTEMPT 4: Navigating to {fallback_url}...")
+        fallback_url = base_url + path
+        print(f"  ATTEMPT 4: Going to {fallback_url}...")
         try:
             page.goto(fallback_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
+            print(f"  ATTEMPT 4: Landed on {page.url}")
 
-            if page.url.rstrip("/") == url_before.rstrip("/"):
-                print(f"  ATTEMPT 4: {path} redirected back to same page")
-                continue
-
-            # Now try to click a product on this collection page
-            candidates = page.evaluate("""() => {
-                const links = Array.from(document.querySelectorAll('a[href]'));
-                const results = [];
+            # Find product links on this page using the visible-image-links JS
+            candidates = page.evaluate(VISIBLE_IMAGE_LINKS_JS)
+            # Also get any /products/ hrefs from the page
+            product_hrefs = page.evaluate("""() => {
+                const links = document.querySelectorAll('a[href*="/products/"]');
+                const hrefs = new Set();
                 for (const a of links) {
-                    const href = a.getAttribute('href') || '';
-                    if (!href || href === '/' || href === '#') continue;
-                    if (a.closest('nav') || a.closest('header') || a.closest('footer')) continue;
-                    const img = a.querySelector('img');
-                    if (!img) continue;
-                    const rect = a.getBoundingClientRect();
-                    if (rect.width < 50 || rect.height < 50) continue;
-                    if (rect.top < 0 || rect.top > window.innerHeight * 3) continue;
-                    results.push({href: href, area: rect.width * rect.height});
+                    const href = a.getAttribute('href');
+                    if (href) hrefs.add(href);
                 }
-                results.sort((a, b) => b.area - a.area);
-                return results.slice(0, 3);
+                return Array.from(hrefs).slice(0, 10);
             }""")
 
-            if candidates:
-                print(f"  ATTEMPT 4: Found {len(candidates)} products on {path}")
-                for c in candidates:
-                    pre_nav = page.url
-                    success = _try_click_and_verify(
-                        f"product on {path}",
-                        lambda h=c["href"]: page.locator(f'a[href="{h}"]').first.click(timeout=5000)
-                    )
-                    if success:
-                        return True, page.url
-                    if page.url != pre_nav:
-                        page.go_back(timeout=10000)
-                        page.wait_for_timeout(2000)
-            else:
-                print(f"  ATTEMPT 4: No products found on {path}")
+            # Merge and prioritize product-slug hrefs
+            all_hrefs = []
+            seen = set()
+            for href in product_hrefs:
+                if href not in seen and href not in tried_hrefs:
+                    seen.add(href)
+                    all_hrefs.append(href)
+            for c in candidates:
+                if c["href"] not in seen and c["href"] not in tried_hrefs:
+                    seen.add(c["href"])
+                    all_hrefs.append(c["href"])
+
+            print(f"  ATTEMPT 4: Found {len(all_hrefs)} product candidates on {path}")
+            for i, href in enumerate(all_hrefs[:5]):
+                print(f"    [{i}] {href[:80]}")
+
+            for href in all_hrefs[:3]:
+                tried_hrefs.add(href)
+                _check_timeout()
+                if _goto_and_check(f"product on {path}", href):
+                    return True, page.url
         except Exception as e:
             print(f"  ATTEMPT 4: {path} failed: {e}")
             continue
