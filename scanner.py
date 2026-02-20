@@ -14,6 +14,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -1729,6 +1730,9 @@ def click_product_and_verify(page, timeout_checker=None):
         return unique.slice(0, 10);
     }"""
 
+    # Track all hrefs we've already tried navigating to (avoid duplicates)
+    tried_hrefs = set()
+
     # ── ATTEMPT 1: Visible <a> tags with <img> in main content ────────
     print("STEP 4 ATTEMPT 1: Visible image links in main content...")
     _check_timeout()
@@ -1745,161 +1749,239 @@ def click_product_and_verify(page, timeout_checker=None):
         other_hrefs = [c for c in result if c not in product_hrefs]
 
         for cand in product_hrefs[:2]:
+            tried_hrefs.add(cand["href"])
             _check_timeout()
-            if _goto_and_check(f"image-link (product href)", cand["href"]):
+            if _goto_and_check("image-link (product href)", cand["href"]):
                 return True, page.url
 
         for cand in other_hrefs[:2]:
+            tried_hrefs.add(cand["href"])
             _check_timeout()
-            if _goto_and_check(f"image-link (other href)", cand["href"]):
+            if _goto_and_check("image-link (other href)", cand["href"]):
                 return True, page.url
     except Exception as e:
         print(f"  ATTEMPT 1 error: {e}")
 
-    # ── ATTEMPT 2: CSS selectors → get href → goto ───────────────────
-    print("STEP 4 ATTEMPT 2: CSS product selectors → direct navigation...")
+    # ── ATTEMPT 2: Scroll slowly to trigger lazy loading, then re-scan ─
+    print("STEP 4 ATTEMPT 2: Scroll to trigger lazy loading, then re-scan...")
     _check_timeout()
-    product_selectors = [
-        # Shopify / generic product URLs
-        'a[href*="/products/"]',
-        'a[href*="/product/"]',
-        'a[href*="/dp/"]',
-        'a[href*="/item/"]',
-        'a[href*="/p/"]',
-        # Product card class patterns
-        '.product-card a',
-        '.product-item a',
-        '.product-tile a',
-        '.product-grid-item a',
-        '.collection-product a',
-        # Grid layouts
-        '.grid-item a',
-        '.grid__item a',
-        # Data attribute patterns
-        '[data-product] a',
-        '[data-product-id] a',
-        '[data-product-card] a',
-        '[data-testid*="product"] a',
-        '[data-automation*="product"] a',
-        # Article-based product cards
-        'article a[href]',
-        'article[class*="product"] a',
-        # Class wildcard patterns
-        '[class*="product"] a[href]',
-        '[class*="ProductCard"] a',
-        '[class*="product-card"] a',
-        '[class*="productCard"] a',
-        # Card layouts
-        '.card a[href]',
-        '[class*="card"] a[href*="/product"]',
-        # Wayfair / large retailer patterns
-        '[class*="BrowseCard"] a',
-        '[class*="browse-card"] a',
-        '[class*="CategoryCard"] a',
-        '[class*="item-card"] a',
-        '[class*="ItemCard"] a',
-        # Homepage featured products
-        '[class*="featured"] a[href]',
-        '[class*="promoted"] a[href]',
-        '[class*="hero"] a[href*="/product"]',
-        '[class*="hero"] a[href*="/shop"]',
-    ]
+    try:
+        # Navigate back to the collection/shop page if attempt 1 navigated away
+        current_url = page.url
+        if not any(p in current_url.lower() for p in ["/collections", "/shop", "/browse", "/catalog"]):
+            # We may have navigated away in attempt 1 - go back
+            page.go_back()
+            page.wait_for_timeout(2000)
 
-    tried_hrefs = set()
-    attempt2_navs = 0
-    MAX_ATTEMPT2_NAVS = 5  # Cap total navigations in attempt 2
-    for sel in product_selectors:
-        if attempt2_navs >= MAX_ATTEMPT2_NAVS:
-            print(f"  ATTEMPT 2: Hit nav limit ({MAX_ATTEMPT2_NAVS}), moving on")
-            break
-        _check_timeout()
-        try:
-            # Get all hrefs matching this selector via JS (avoids visibility issues)
+        # Scroll in 500px increments, waiting 1s between each, through first 2000px
+        for scroll_y in range(500, 2500, 500):
+            _check_timeout()
+            page.evaluate(f"window.scrollTo(0, {scroll_y})")
+            page.wait_for_timeout(1000)
+            print(f"  ATTEMPT 2: Scrolled to {scroll_y}px")
+
+        # Now re-check for visible product links
+        result = page.evaluate(VISIBLE_IMAGE_LINKS_JS)
+        print(f"  ATTEMPT 2: After scrolling, found {len(result)} visible image-link candidates")
+        for i, cand in enumerate(result[:5]):
+            print(f"    [{i}] {cand['href'][:80]}  ({cand['width']}x{cand['height']})")
+
+        for cand in result[:3]:
+            if cand["href"] in tried_hrefs:
+                continue
+            tried_hrefs.add(cand["href"])
+            _check_timeout()
+            if _goto_and_check("scroll-revealed image-link", cand["href"]):
+                return True, page.url
+
+        # Also check CSS selectors after scrolling
+        for sel in ['a[href*="/products/"]', 'a[href*="/product/"]', 'a[href*="/dp/"]',
+                     'a[href*="/item/"]', 'a[href*="/p/"]']:
             hrefs = page.evaluate(f"""() => {{
                 const els = document.querySelectorAll('{sel}');
                 const hrefs = new Set();
                 for (const el of els) {{
                     const a = el.closest('a') || el;
                     const href = a.getAttribute('href');
-                    if (href && href !== '/' && href !== '#' && !href.startsWith('javascript:')) {{
+                    if (href && href !== '/' && href !== '#' && !href.startsWith('javascript:'))
                         hrefs.add(href);
-                    }}
                 }}
-                return Array.from(hrefs).slice(0, 3);
+                return Array.from(hrefs).slice(0, 5);
             }}""")
-            if not hrefs:
-                continue
-            print(f"  ATTEMPT 2: '{sel}' → {len(hrefs)} unique hrefs")
             for href in hrefs:
-                if attempt2_navs >= MAX_ATTEMPT2_NAVS:
-                    break
                 if href in tried_hrefs:
                     continue
-                tried_hrefs.add(href)
-                attempt2_navs += 1
-                _check_timeout()
-                if _goto_and_check(f"CSS '{sel}'", href):
-                    return True, page.url
-        except Exception:
-            continue
+                # Only try hrefs NOT in search/menu containers
+                is_visible = page.evaluate(f"""() => {{
+                    const el = document.querySelector('a[href="{href.replace(chr(34), "").replace(chr(92), "")}"]');
+                    if (!el) return false;
+                    if (el.closest('[class*="search"]') || el.closest('[class*="menu"]') ||
+                        el.closest('nav') || el.closest('header')) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden';
+                }}""")
+                if is_visible:
+                    tried_hrefs.add(href)
+                    _check_timeout()
+                    if _goto_and_check(f"scroll-revealed CSS '{sel}'", href):
+                        return True, page.url
+    except Exception as e:
+        print(f"  ATTEMPT 2 error: {e}")
 
-    # ── ATTEMPT 3: Scroll to reveal lazy content, re-scan ─────────────
-    print("STEP 4 ATTEMPT 3: Scroll + re-scan for product links...")
+    # ── ATTEMPT 3: Extract product URLs from raw page HTML ─────────────
+    print("STEP 4 ATTEMPT 3: Extract product URLs from raw page HTML...")
     _check_timeout()
     try:
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-        page.wait_for_timeout(3000)
+        # Navigate back to collection page if needed
+        current_url = page.url
+        if not any(p in current_url.lower() for p in ["/collections", "/shop", "/browse", "/catalog"]):
+            page.go_back()
+            page.wait_for_timeout(2000)
 
-        candidates = page.evaluate("""() => {
-            const links = Array.from(document.querySelectorAll('a[href]'));
-            const results = [];
-            const productPatterns = ['/products/', '/product/', '/p/', '/dp/', '/item/'];
-            for (const a of links) {
-                const href = (a.getAttribute('href') || '');
-                if (!href || href === '/' || href === '#') continue;
-                const hasSlug = productPatterns.some(p => {
-                    const idx = href.toLowerCase().indexOf(p);
-                    if (idx < 0) return false;
-                    const after = href.substring(idx + p.length).replace(/[?#].*/, '').trim();
-                    return after.length > 0;
-                });
-                if (!hasSlug) continue;
-                results.push(href);
-            }
-            return [...new Set(results)].slice(0, 10);
-        }""")
-        print(f"  ATTEMPT 3: Found {len(candidates)} product-slug links after scroll")
-        for i, href in enumerate(candidates[:5]):
-            print(f"    [{i}] {href[:80]}")
+        # Get the raw innerHTML and regex-extract product URLs
+        raw_html = page.evaluate("() => document.documentElement.innerHTML")
+        # Find all /products/slug patterns in the raw HTML (including inside JS, data attrs, etc.)
+        product_url_pattern = re.compile(
+            r'(?:href=["\']|["\'])((?:https?://[^"\']*)?/products/[a-zA-Z0-9][a-zA-Z0-9\-_]*)["\']',
+            re.IGNORECASE
+        )
+        matches = product_url_pattern.findall(raw_html)
+        # Deduplicate and filter
+        seen_slugs = set()
+        unique_product_urls = []
+        for m in matches:
+            # Normalize: strip query params for dedup
+            clean = m.split("?")[0].split("#")[0].rstrip("/")
+            if clean not in seen_slugs and not _is_external_href(clean):
+                seen_slugs.add(clean)
+                unique_product_urls.append(m)
 
-        for href in candidates[:3]:
-            if href in tried_hrefs:
+        print(f"  ATTEMPT 3: Found {len(unique_product_urls)} product URLs in raw HTML")
+        for i, url in enumerate(unique_product_urls[:5]):
+            print(f"    [{i}] {url[:80]}")
+
+        for url in unique_product_urls[:3]:
+            if url in tried_hrefs:
                 continue
-            tried_hrefs.add(href)
+            tried_hrefs.add(url)
             _check_timeout()
-            if _goto_and_check(f"scroll-revealed product link", href):
+            if _goto_and_check("raw-HTML product URL", url):
                 return True, page.url
     except Exception as e:
         print(f"  ATTEMPT 3 error: {e}")
 
-    # ── ATTEMPT 4: Go to /collections/all, /products, /shop → pick product
-    print("STEP 4 ATTEMPT 4: Navigate to collection pages, find products...")
+    # ── ATTEMPT 4: JavaScript click (bypasses Playwright visibility) ───
+    print("STEP 4 ATTEMPT 4: JavaScript click on product links...")
+    _check_timeout()
+    try:
+        # Navigate back to collection page if needed
+        current_url = page.url
+        if not any(p in current_url.lower() for p in ["/collections", "/shop", "/browse", "/catalog"]):
+            page.go_back()
+            page.wait_for_timeout(2000)
+
+        # Use JS to find product link hrefs (regardless of visibility)
+        hrefs = page.evaluate("""() => {
+            const links = document.querySelectorAll('a[href*="/products/"]');
+            const hrefs = new Set();
+            for (const a of links) {
+                const href = a.getAttribute('href');
+                if (href && href !== '/' && href !== '#') hrefs.add(href);
+            }
+            return Array.from(hrefs).slice(0, 10);
+        }""")
+        print(f"  ATTEMPT 4: Found {len(hrefs)} product links via JS")
+        for i, href in enumerate(hrefs[:5]):
+            print(f"    [{i}] {href[:80]}")
+
+        for href in hrefs[:3]:
+            if href in tried_hrefs:
+                continue
+            tried_hrefs.add(href)
+            _check_timeout()
+            # Navigate directly — don't click, just goto
+            if _goto_and_check("JS-found product link", href):
+                return True, page.url
+    except Exception as e:
+        print(f"  ATTEMPT 4 error: {e}")
+
+    # ── ATTEMPT 5: Shadow DOM piercing ─────────────────────────────────
+    print("STEP 4 ATTEMPT 5: Shadow DOM piercing for product links...")
+    _check_timeout()
+    try:
+        # Navigate back to collection page if needed
+        current_url = page.url
+        if not any(p in current_url.lower() for p in ["/collections", "/shop", "/browse", "/catalog"]):
+            page.go_back()
+            page.wait_for_timeout(2000)
+
+        # Walk shadow roots looking for product links
+        shadow_hrefs = page.evaluate("""() => {
+            const hrefs = new Set();
+            function walkShadowRoots(root) {
+                // Check regular links in this root
+                const links = root.querySelectorAll('a[href*="/products/"], a[href*="/product/"]');
+                for (const a of links) {
+                    const href = a.getAttribute('href');
+                    if (href) hrefs.add(href);
+                }
+                // Recurse into shadow roots
+                const allElements = root.querySelectorAll('*');
+                for (const el of allElements) {
+                    if (el.shadowRoot) {
+                        walkShadowRoots(el.shadowRoot);
+                    }
+                }
+            }
+            walkShadowRoots(document);
+            return Array.from(hrefs).slice(0, 10);
+        }""")
+        print(f"  ATTEMPT 5: Found {len(shadow_hrefs)} product links in shadow DOM")
+        for i, href in enumerate(shadow_hrefs[:5]):
+            print(f"    [{i}] {href[:80]}")
+
+        for href in shadow_hrefs[:3]:
+            if href in tried_hrefs:
+                continue
+            tried_hrefs.add(href)
+            _check_timeout()
+            if _goto_and_check("shadow-DOM product link", href):
+                return True, page.url
+    except Exception as e:
+        print(f"  ATTEMPT 5 error: {e}")
+
+    # ── ATTEMPT 6: Navigate to /collections/all, /products, /shop and repeat ─
+    print("STEP 4 ATTEMPT 6: Navigate to collection pages, find products...")
     _check_timeout()
     fallback_paths = ["/collections/all", "/products", "/shop", "/collections"]
 
     for path in fallback_paths:
         _check_timeout()
         fallback_url = base_url + path
-        print(f"  ATTEMPT 4: Going to {fallback_url}...")
+        print(f"  ATTEMPT 6: Going to {fallback_url}...")
         try:
             page.goto(fallback_url, timeout=PAGE_LOAD_TIMEOUT, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
-            print(f"  ATTEMPT 4: Landed on {page.url}")
+            print(f"  ATTEMPT 6: Landed on {page.url}")
 
-            # Find product links on this page using the visible-image-links JS
+            # Scroll to trigger lazy loading on this page too
+            for scroll_y in range(500, 2000, 500):
+                page.evaluate(f"window.scrollTo(0, {scroll_y})")
+                page.wait_for_timeout(800)
+
+            # Try visible image links first
             candidates = page.evaluate(VISIBLE_IMAGE_LINKS_JS)
-            # Also get product-like hrefs from the page
-            product_hrefs = page.evaluate("""() => {
+
+            # Also extract product URLs from raw HTML of this page
+            raw_html = page.evaluate("() => document.documentElement.innerHTML")
+            product_url_pattern = re.compile(
+                r'(?:href=["\']|["\'])((?:https?://[^"\']*)?/products/[a-zA-Z0-9][a-zA-Z0-9\-_]*)["\']',
+                re.IGNORECASE
+            )
+            html_matches = product_url_pattern.findall(raw_html)
+
+            # Also get product-like hrefs via selectors
+            selector_hrefs = page.evaluate("""() => {
                 const sels = [
                     'a[href*="/products/"]', 'a[href*="/product/"]',
                     'a[href*="/product.do"]', 'a[href*="/browse/product"]',
@@ -1916,19 +1998,24 @@ def click_product_and_verify(page, timeout_checker=None):
                 return Array.from(hrefs).slice(0, 10);
             }""")
 
-            # Merge and prioritize product-slug hrefs
+            # Merge all sources: selector hrefs + raw HTML + visible image links
             all_hrefs = []
             seen = set()
-            for href in product_hrefs:
-                if href not in seen and href not in tried_hrefs:
+            for href in selector_hrefs:
+                if href not in seen and href not in tried_hrefs and not _is_external_href(href):
                     seen.add(href)
+                    all_hrefs.append(href)
+            for href in html_matches:
+                clean = href.split("?")[0].split("#")[0].rstrip("/")
+                if clean not in seen and href not in tried_hrefs and not _is_external_href(href):
+                    seen.add(clean)
                     all_hrefs.append(href)
             for c in candidates:
                 if c["href"] not in seen and c["href"] not in tried_hrefs:
                     seen.add(c["href"])
                     all_hrefs.append(c["href"])
 
-            print(f"  ATTEMPT 4: Found {len(all_hrefs)} product candidates on {path}")
+            print(f"  ATTEMPT 6: Found {len(all_hrefs)} product candidates on {path}")
             for i, href in enumerate(all_hrefs[:5]):
                 print(f"    [{i}] {href[:80]}")
 
@@ -1938,10 +2025,11 @@ def click_product_and_verify(page, timeout_checker=None):
                 if _goto_and_check(f"product on {path}", href):
                     return True, page.url
         except Exception as e:
-            print(f"  ATTEMPT 4: {path} failed: {e}")
+            print(f"  ATTEMPT 6: {path} failed: {e}")
             continue
 
     print("STEP 4: ALL product click attempts FAILED.")
+    print(f"  Attempted {len(tried_hrefs)} unique URLs across 6 strategies.")
     return False, None
 
 
