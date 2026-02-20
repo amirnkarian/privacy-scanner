@@ -2154,18 +2154,47 @@ def scan_url(browser, url, status_callback=None):
               f"scrolling product page for {POST_PRODUCT_MONITOR}s")
         report_status("STEP 6: Monitoring network during active browsing", 15)
 
-        # ── Scroll product page for 15 seconds (active browsing) ──────
+        # ── Scroll product page for POST_PRODUCT_MONITOR seconds ────
+        # Fire-and-forget JS scroll (runs in browser, returns instantly).
+        # Then use small wait_for_timeout(500) chunks for Playwright event
+        # processing (needed for the request listener to fire).
+        # Hard wall-clock deadline ensures this NEVER exceeds the target
+        # duration, even if a single Playwright call hangs.
         try:
-            page.mouse.move(640, 450)
-            scroll_end = time.time() + POST_PRODUCT_MONITOR
-            while time.time() < scroll_end:
+            page.evaluate(
+                """(seconds) => {
+                    const end = Date.now() + seconds * 1000;
+                    const id = setInterval(() => {
+                        if (Date.now() >= end) { clearInterval(id); return; }
+                        window.scrollBy(0, 350);
+                    }, 1500);
+                }""",
+                POST_PRODUCT_MONITOR,
+            )
+        except Exception:
+            pass  # scroll is nice-to-have, not essential
 
-                page.mouse.wheel(0, 350)
-                page.wait_for_timeout(1500)
-        except ScanTimeout:
-            raise
-        except Exception as e:
-            print(f"STEP 6: Scroll interrupted ({e}) — continuing with what we captured")
+        monitor_deadline = time.time() + POST_PRODUCT_MONITOR
+        while time.time() < monitor_deadline:
+            remaining = monitor_deadline - time.time()
+            if remaining <= 0:
+                break
+            chunk_ms = min(500, int(remaining * 1000))
+            if chunk_ms <= 0:
+                break
+            try:
+                t_before = time.time()
+                page.wait_for_timeout(chunk_ms)
+                # If a 500ms wait takes >5s, CDP is stuck — bail out
+                if time.time() - t_before > 5.0:
+                    print(f"STEP 6: wait_for_timeout hung ({time.time() - t_before:.1f}s "
+                          f"for {chunk_ms}ms call) — bailing out")
+                    break
+            except ScanTimeout:
+                raise
+            except Exception as e:
+                print(f"STEP 6: Scroll interrupted ({e}) — continuing with what we captured")
+                break
 
         # Remove listener to stop capturing.
         try:
