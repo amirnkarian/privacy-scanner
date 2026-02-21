@@ -10,6 +10,13 @@ Open: http://localhost:5000
 
 import json
 import multiprocessing
+# Must be called before any other multiprocessing code.
+# 'spawn' creates a clean Python process instead of forking from gunicorn's
+# worker, which avoids inheriting locked mutexes and corrupted thread state.
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
 import os
 import threading
 import time
